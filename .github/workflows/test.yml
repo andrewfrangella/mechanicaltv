@@ -1,0 +1,20 @@
+name: Test simulation release
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Test conversion, playback, and HTTP API
+        run: python3 -m unittest discover -s tests -v
+      - name: Check shell and JavaScript syntax
+        run: |
+          bash -n install.sh packaging/make-test-clip.sh
+          node --check mechanical_tv/static/app.js
