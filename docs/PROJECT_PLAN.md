@@ -2,9 +2,9 @@
 
 ## Intended experience
 
-Power on → join Wi-Fi → open local page → sign in → upload → validate → choose framing → prepare → preview → play → stop → shut down.
+Power on → receive HDMI through USB capture → convert continuously → preview latest frame → future synchronized mechanical output → shut down.
 
-The Pi owns uploads and playback. Laptops/phones provide controls. Internet is only needed for installation/maintenance. The Pi should eventually be deployable as an appliance, but a custom OS is unnecessary: use Pi OS with an automatically started application.
+No access point, browser, login or upload is required. The original web upload studio is retained for development only. HDMI ingestion is now the primary software path; hardware output has not started.
 
 ## Implementation status
 
@@ -17,7 +17,7 @@ The Pi owns uploads and playback. Laptops/phones provide controls. Internet is o
 | Source and prepared previews | Implemented | Improved timeline synchronization |
 | Play/pause/stop/seek/loop/brightness | Simulation implemented | Physical output adapter |
 | Automatic startup | Installer and unit supplied | Validate on Pi OS |
-| Standalone hotspot | Manual documented setup | Wizard, reconnect QR, network recovery |
+| HDMI capture | Headless V4L2 conversion and retry implemented | Validate actual adapter and Pi |
 | Health and diagnostics | Basic implementation | Throttling, memory, buffer/encoder telemetry |
 | Self-test | CLI dependency check and automated tests | Browser-initiated full appliance self-test |
 | Multiple browsers | Shared state; last command wins | Explicit operator ownership |
@@ -25,18 +25,18 @@ The Pi owns uploads and playback. Laptops/phones provide controls. Internet is o
 | Safe shutdown | OS/SSH instructions | Narrow privileged helper and UI action |
 | Motor/LED/encoder integration | Not implemented | Hardware selection, wiring, measurement |
 | Calibration page | Not implemented | Test patterns, phase, scan direction, limits |
-| RGB, audio, live HDMI | Not implemented | After grayscale physical playback |
+| RGB, audio | Not implemented | After grayscale physical playback |
 
 There is no fake motor speed readout, simulated “sync lock,” or working-looking hardware control in the UI. The simulation label remains visible.
 
 ## Milestones
 
 1. **Local simulation:** validate authentication, uploads, real FFmpeg conversion, previews, controls, persistence and failure handling.
-2. **Pi software acceptance:** run installer on the actual Pi, reboot, test hotspot, run an extended loop, verify temperature/resource behavior, test interrupted work.
+2. **Pi software acceptance:** run installer on the actual Pi, reboot, test offline HDMI capture, run an extended loop, verify temperature/resource behavior, test interrupted work.
 3. **Hardware bring-up:** confirm component compatibility and wiring; test motor/index separately from LED; measure timing. Select a driver architecture based on evidence.
 4. **Static optical image:** bars/gradient, scan direction, phase, brightness and distortion calibration.
 5. **Physical grayscale video:** bounded buffering, measured synchronization, fault handling, realistic frame-rate/brightness limits.
-6. **Optional features:** richer calibration, RGB, HDMI capture, kiosk, automatic hotspot configuration and appliance packaging.
+6. **Optional features:** richer calibration, RGB, kiosk and appliance packaging.
 
 ## Decisions still open
 

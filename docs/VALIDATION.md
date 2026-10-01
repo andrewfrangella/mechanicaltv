@@ -67,7 +67,7 @@ The script creates temporary credentials/media, starts its own localhost server,
 - [ ] Install on a fresh supported 64-bit Pi OS image.
 - [ ] Confirm source preview H.264 playback in intended client browsers.
 - [ ] Reboot and open the interface without desktop login; verify idle state.
-- [ ] Test both LAN and standalone hotspot; verify offline operation.
+- [ ] Test HDMI capture with networking disconnected.
 - [ ] Run a 30-minute loop, monitor memory, temperature, service stability, and browser behavior.
 - [ ] Upload/convert while idle; verify queue deferral during playback.
 - [ ] Interrupt an upload, restart during preparation, and verify recovery.
@@ -79,3 +79,15 @@ The script creates temporary credentials/media, starts its own localhost server,
 ## Hardware acceptance — future stage
 
 Requires actual motor speed/index measurements, LED current and pulse timing measurements, calibration images, loaded-disk tests, loss-of-sync behavior and independently verified stop behavior. Browser simulation must never substitute for these checks.
+
+## HDMI acceptance — pending actual hardware
+
+- Confirm Linux V4L2 compatibility and choose a stable capture path/mode.
+- Compare latest PGM to HDMI bars/gradient and test fit/crop.
+- Boot with no device; attach it and verify capture recovers.
+- Disconnect USB, stop HDMI source, and test reconnect separately (adapter no-signal behavior varies).
+- Verify stopped/stalled preview blanks and SIGTERM releases FFmpeg.
+- Run 30 minutes on Pi 4, checking temperature, memory and latency.
+- Reboot with networking disconnected; confirm capture without login/browser.
+
+No actual Pi, capture adapter, HAT or physical output validation has been performed for this change.

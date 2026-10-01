@@ -1,29 +1,6 @@
-# Install and operate on a Raspberry Pi
+# HDMI appliance installation
 
-This guide describes the provided simulation software. Hardware output remains disabled. Commands marked as configuration changes affect the Pi on which you run them, not the laptop hosting your browser.
-
-## 1. Prepare Pi OS
-
-Use [Raspberry Pi Imager](https://www.raspberrypi.com/software/) to write Raspberry Pi OS **64-bit**. Lite is sufficient when you use a laptop or phone browser; Desktop is useful for an attached monitor. Choose a supported release with Python 3.11+. Set:
-
-- Hostname: `mechanical-tv` (recommended, not mandatory).
-- Your own OS username/password; there is no assumed `pi` user.
-- Country/timezone and home Wi-Fi credentials, or use Ethernet.
-- SSH if you want remote maintenance, preferably with your public key.
-
-Let Imager verify the card. Boot with the Pi kit's power supply. Initial installation needs internet. [Official setup instructions](https://www.raspberrypi.com/documentation/computers/getting-started.html).
-
-## 2. Connect for installation
-
-On the Pi's desktop, open Terminal; or from your laptop:
-
-```bash
-ssh YOUR_USERNAME@mechanical-tv.local
-```
-
-Replace `YOUR_USERNAME`. If `.local` discovery fails, find the Pi's IP in your router and use it instead. On a locally attached Pi terminal, `hostname -I` shows addresses.
-
-## 3. Install the application
+Use Raspberry Pi OS 64-bit with Python 3.11+, a Raspberry Pi 4 and its dedicated power supply. Install using a local keyboard/monitor or SSH over your existing network. Internet is required for package installation, not operation. No AP setup is part of this flow.
 
 ```bash
 sudo apt update
@@ -33,119 +10,53 @@ cd mechanicaltv
 sudo bash install.sh
 ```
 
-Read the installer before running it if desired. It:
+The installer creates an unprivileged service account, installs Python/FFmpeg/v4l-utils, grants video-device access, copies a versioned release, and enables `mechanical-tv.service`. It does not prompt for a web password or change networking/GPIO. Updating an older installation replaces the web service with capture and preserves its data and existing environment file; obsolete host/port settings are ignored. A manually configured AP is not removed: disable any old hotspot autoconnect from a local terminal or Ethernet connection if you previously configured one.
 
-1. Checks Pi OS/Debian and Python prerequisites.
-2. Installs Python, FFmpeg and curl through apt.
-3. Creates an unprivileged `mechanical-tv` service account.
-4. Copies application files into a versioned `/opt/mechanical-tv/releases/` directory.
-5. Prompts for an application password of at least 12 characters on first install.
-6. Creates persistent data storage and the environment file.
-7. Installs and starts `mechanical-tv.service`, enabled at boot.
-8. Checks the local `/healthz` endpoint.
+## Capture device preparation
 
-The release uses only Python's standard library, so there is no pip or virtual-environment step. It never starts a motor. It does not alter networking.
+Connect source HDMI → capture device HDMI input → capture device USB → Pi USB. The Pi's micro-HDMI ports are display outputs, not capture inputs. Confirm your device supports Linux V4L2; its exact model is still pending.
 
-Open `http://mechanical-tv.local:8080` or `http://<Pi-IP>:8080`. Sign in using the **application** password. This is distinct from your OS and Wi-Fi passwords.
-
-If the Pi runs a firewall, allow TCP 8080 only from the intended local network. No public router port-forwarding is required.
-
-## 4. Verify the first installation
+Stop capture while querying device capabilities:
 
 ```bash
-systemctl status mechanical-tv --no-pager
-curl --fail http://127.0.0.1:8080/healthz
-cd /opt/mechanical-tv/current
-sudo -u mechanical-tv python3 -m mechanical_tv.server doctor --data /var/lib/mechanical-tv
+sudo systemctl stop mechanical-tv
+v4l2-ctl --list-devices
+v4l2-ctl --device /dev/video0 --list-formats-ext
+ls -l /dev/v4l/by-id/
 ```
 
-`/healthz` checks that HTTP responds, not video conversion or hardware health. `doctor` checks dependencies and local setup. Follow [VALIDATION.md](VALIDATION.md) for an end-to-end check.
-
-Generate a test clip from your cloned repository with `bash packaging/make-test-clip.sh /tmp/test-pattern.mp4`. If you generated it on the Pi, copy it to your laptop with `scp YOUR_USERNAME@mechanical-tv.local:/tmp/test-pattern.mp4 .` and upload it through Library.
-
-Reboot once with `sudo reboot`. The application should return without any desktop login. Playback deliberately returns to idle.
-
-## 5. Optional standalone Wi-Fi hotspot
-
-This is an explicit manual setup, **not performed by the installer**. First verify the application over your home network. Use Ethernet or a directly attached keyboard/screen while changing Wi-Fi so you don't strand your only SSH connection. Creating a hotspot disconnects the Pi's existing Wi-Fi client connection.
-
-The commands below assume NetworkManager, interface `wlan0`, and an unused `192.168.50.0/24` subnet. Check `nmcli device status` and choose another subnet if it conflicts with Ethernet or another connected network. Do not run the create command again if a profile named `mechanical-tv-hotspot` already exists.
-
-```bash
-sudo nmcli --ask device wifi hotspot ifname wlan0 con-name mechanical-tv-hotspot ssid MechanicalTV
-sudo nmcli connection modify mechanical-tv-hotspot ipv4.addresses 192.168.50.1/24 ipv4.method shared ipv6.method disabled connection.autoconnect yes connection.autoconnect-priority 100
-sudo nmcli connection up mechanical-tv-hotspot
-```
-
-NetworkManager will configure or generate hotspot credentials; inspect the active hotspot locally using `nmcli device wifi show-password` and keep those credentials private. Behavior can vary by OS/NetworkManager version; use the [official Raspberry Pi networking guide](https://www.raspberrypi.com/documentation/computers/configuration.html) for your release.
-
-On your laptop or phone, join **MechanicalTV**, then visit **http://192.168.50.1:8080**. No internet is needed after installation. The client may display “No internet”; stay connected to this network. Ethernet can provide the Pi with internet for maintenance while Wi-Fi serves clients. Do not depend on simultaneous hotspot/client operation on the built-in Wi-Fi adapter.
-
-To return to home Wi-Fi, from Ethernet or a local terminal:
-
-```bash
-sudo nmcli connection modify mechanical-tv-hotspot connection.autoconnect no
-sudo nmcli connection down mechanical-tv-hotspot
-sudo nmcli --ask device wifi connect YOUR_HOME_SSID
-```
-
-Replace the SSID. The browser address will change to the Pi's home-network address. A captive portal and automatic fallback timer are not implemented.
-
-## Configuration and maintenance
-
-Configuration: `/etc/mechanical-tv/environment`:
+Choose the video capture node (some devices expose additional metadata nodes). Prefer its stable `/dev/v4l/by-id/...` path over a changing `/dev/video0` number. Set `/etc/mechanical-tv/environment`:
 
 ```text
 MTV_DATA=/var/lib/mechanical-tv
-MTV_HOST=0.0.0.0
-MTV_PORT=8080
+MTV_CAPTURE_DEVICE=/dev/video0
+MTV_CAPTURE_FIT=fit
 ```
 
-The service unit grants write access only to the standard data directory. Moving data requires a corresponding unit override. The default port is recommended; after changing configuration, restart the service and use the new address.
+Optional `MTV_CAPTURE_FORMAT`, `MTV_CAPTURE_SIZE`, and `MTV_CAPTURE_RATE` select an advertised device mode, e.g. `mjpeg`, `1280x720`, `30`. These examples are not guaranteed for your adapter. Omitting them uses device defaults. Fit preserves the image with black padding; `crop` fills the output with a center crop. Output remains 32 × 25 grayscale at 10 fps. [FFmpeg V4L2 documentation](https://ffmpeg.org/ffmpeg-devices.html#video4linux2_002c-v4l2).
 
 ```bash
 sudo systemctl restart mechanical-tv
+systemctl status mechanical-tv --no-pager
 journalctl -u mechanical-tv -n 100 --no-pager
-journalctl -u mechanical-tv -f
+sudo cat /var/lib/mechanical-tv/live/capture.json
 ```
 
-Reset the application password:
+`capturing` means complete frames were received, not that HDMI content or physical synchronization was verified. Some adapters emit black/color bars when HDMI is disconnected. `waiting` means capture failed/stalled and is retrying. Check device path, permissions, supported mode, cable and source. The service blanks the preview after a five-second frame stall or capture EOF. Adapter-generated no-signal frames cannot be distinguished generically.
+
+Copy `/var/lib/mechanical-tv/live/latest.pgm` locally to inspect it in an image viewer. This file is replaced atomically and holds only the latest frame; no video is recorded. Reboot and test capture with networking disconnected. No browser or desktop session is required.
+
+## Maintenance
+
+Update with `git pull --ff-only` and `sudo bash install.sh` from the clone. Configuration and old library data are preserved. Installation checks service startup, not signal availability; inspect capture status separately. Previous release directories are retained for manual rollback. Stop the service before backing up `/var/lib/mechanical-tv` and `/etc/mechanical-tv`.
 
 ```bash
-cd /opt/mechanical-tv/current
-sudo -u mechanical-tv python3 -m mechanical_tv.server reset-password --data /var/lib/mechanical-tv
-sudo systemctl restart mechanical-tv
-```
-
-Existing sessions are invalidated by the restart. Sessions normally expire after 12 hours.
-
-## Updates and backups
-
-Stop playback first. From your cloned repository:
-
-```bash
-git pull --ff-only
-sudo bash install.sh
-```
-
-The installer preserves media and passwords, retains previous application directories, and backs up the stopped SQLite database before switching versions. Its startup check is basic HTTP health; it is not a full regression test. A failed check restores the previous application directory when available. Database schema migration/automatic downgrade is not implemented in version 0.1.0.
-
-For a complete backup, stop the service and copy `/var/lib/mechanical-tv` and `/etc/mechanical-tv` to another storage device, then start the service. Database-only update backups do not contain uploaded videos. Protect backups because they include password hashes and originals. Monitor and periodically remove old release/database backups manually after verifying a new version.
-
-## Shutdown
-
-Press **Stop** in the UI, then use a Pi terminal or SSH:
-
-```bash
+sudo systemctl stop mechanical-tv
 sudo shutdown -h now
 ```
 
-Wait for the Pi to complete shutdown before disconnecting power. A web shutdown button is not part of this release. No reboot, package installation, networking, or shutdown privilege is granted to the web service.
+Wait for shutdown before removing power. To disable boot capture, use `sudo systemctl disable --now mechanical-tv`.
 
-## Remove the application
+## Optional web development studio
 
-```bash
-sudo systemctl disable --now mechanical-tv
-```
-
-This stops automatic operation and preserves your library. Delete installed files and the account separately only after backing up anything you want to keep. Network profiles created manually are independent of the application.
+The installed appliance does not start the web studio. From a development checkout, use `python3 -m mechanical_tv.server init --data ./studio-data`, then `python3 -m mechanical_tv.server serve --data ./studio-data`. Open `http://127.0.0.1:8080`. See [USER_GUIDE.md](USER_GUIDE.md) for this upload simulation tool. It has no live HDMI controls.

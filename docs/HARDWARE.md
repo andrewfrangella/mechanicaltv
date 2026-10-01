@@ -1,6 +1,6 @@
 # Hardware record — integration pending
 
-This file records the owner's supplied parts and the discussion so far. It is **not a verified wiring diagram or authorization to energize the assembly**. Hardware decisions were deferred while building the upload interface.
+This file records the owner's supplied parts and the discussion so far. It is **not a verified wiring diagram or authorization to energize the assembly**. Hardware remains unbuilt; HDMI capture is now the primary source.
 
 | Item | Owner-supplied description |
 | --- | --- |
@@ -13,7 +13,7 @@ This file records the owner's supplied parts and the discussion so far. It is **
 | Light sources | 3 W white LEDs; 3 W RGB LEDs for a later stage |
 | Feedback | Photoelectric index sensor; exact model pending |
 | Other | Switches, potentiometers, wire, solder, black PLA, printer supplies |
-| Future source | HDMI capture device; exact model pending |
+| Primary source | Owner has an HDMI input/capture device; exact model and Linux V4L2 support pending |
 
 ## Findings to carry into integration
 
@@ -34,3 +34,11 @@ The [reference firmware](https://github.com/bitluni/MechanicalTV/blob/main/Mecha
 Confirm exact motor, LED, sensor, driver and supply models; obtain a complete circuit; decide output architecture; verify logic levels and power distribution; establish mechanical mounting, balance and guarding; measure encoder timing and LED modulation. The current software never accesses GPIO and must not be presented as proof of hardware compatibility.
 
 References: [project repository](https://github.com/bitluni/MechanicalTV), [printed models](https://github.com/bitluni/MechanicalTV/tree/main/Models), [owner's video reference](https://www.youtube.com/watch?v=R-wbfP1pmVw&t=375s). Video-only details were not independently verified during this build.
+
+## HDMI-first integration boundary
+
+The Pi 4 receives HDMI via a USB capture adapter; its onboard micro-HDMI connectors are outputs. [Official Pi setup documentation](https://www.raspberrypi.com/documentation/computers/getting-started.html). Confirm the capture model, USB interface, advertised modes and behavior on signal loss before bench acceptance.
+
+The software consumes HDMI continuously and exposes a latest 800-byte gray8 image through a preview sink. This is the boundary for a future output adapter; it contains no motor commands or GPIO assignments. The HAT is retained in the parts list, but no compatibility or television-speed claim is made. Adafruit specifies a 5–12 V motor supply range in its [powering guide](https://learn.adafruit.com/adafruit-dc-and-stepper-motor-hat-for-raspberry-pi/powering-motors). Keep driver selection open until the listed low-resistance motor and required timing are verified.
+
+Plan separate capture/conversion and synchronized output responsibilities. Future output must consume the newest frame, map disk scan order, blank on stale input/lost index, and enforce an independently validated stop/watchdog. The current preview timeout is not a physical safety mechanism. Do not tie motor speed to incoming HDMI frame rate; the 10 fps conversion profile is provisional.
