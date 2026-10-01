@@ -10,24 +10,38 @@ if [[ "${ID:-}" != debian && "${ID:-}" != raspbian ]]; then
   exit 1
 fi
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-echo 'Installing HDMI capture preparation. Hardware output is disabled; network settings are unchanged.'
+if [[ ! -t 0 ]]; then
+  echo 'Run in an interactive terminal so the application password can be set.' >&2
+  exit 1
+fi
+echo 'Installing Mechanical TV in REALTIME HARDWARE mode (Adafruit Motor HAT, NEMA 17, LED sync).'
 apt-get update
-apt-get install -y python3 ffmpeg v4l-utils
+apt-get install -y python3 ffmpeg curl python3-pip python3-smbus i2c-tools v4l-utils || true
 python3 -c 'import sys; assert sys.version_info >= (3,11), "Python 3.11+ required"'
 if ! id mechanical-tv >/dev/null 2>&1; then
   useradd --system --home-dir /var/lib/mechanical-tv --shell /usr/sbin/nologin mechanical-tv
 fi
+# Add service user to hardware device groups
+usermod -a -G i2c,gpio,video mechanical-tv 2>/dev/null || true
+
+# Enable I2C interface on Raspberry Pi if raspi-config is present
+if command -v raspi-config >/dev/null 2>&1; then
+  raspi-config nonint do_i2c 0 2>/dev/null || true
+fi
+
 install -d -m 0755 /opt/mechanical-tv/releases /etc/mechanical-tv
 install -d -m 0700 -o mechanical-tv -g mechanical-tv /var/lib/mechanical-tv
 release_dir="/opt/mechanical-tv/releases/$(date -u +%Y%m%dT%H%M%S)-$$"
 install -d -m 0755 "$release_dir"
 cp -R "$project_dir/mechanical_tv" "$release_dir/"
 chmod -R a+rX "$release_dir"
+if [[ ! -f /var/lib/mechanical-tv/auth.json ]]; then
+  (cd "$release_dir" && runuser -u mechanical-tv -- python3 -m mechanical_tv.server init --data /var/lib/mechanical-tv)
+fi
 if [[ ! -f /etc/mechanical-tv/environment ]]; then
-  printf '%s\n' 'MTV_DATA=/var/lib/mechanical-tv' 'MTV_CAPTURE_DEVICE=/dev/video0' 'MTV_CAPTURE_FIT=fit' > /etc/mechanical-tv/environment
+  printf '%s\n' 'MTV_DATA=/var/lib/mechanical-tv' 'MTV_HOST=0.0.0.0' 'MTV_PORT=8080' > /etc/mechanical-tv/environment
   chmod 0644 /etc/mechanical-tv/environment
 fi
-usermod -a -G video mechanical-tv
 # Stop before backing up SQLite. Never copy a live database as an update backup.
 systemctl stop mechanical-tv.service 2>/dev/null || true
 if [[ -f /var/lib/mechanical-tv/media/library.sqlite3 ]]; then
@@ -39,10 +53,28 @@ ln -sfn "$release_dir" /opt/mechanical-tv/current
 install -m 0644 "$project_dir/packaging/mechanical-tv.service" /etc/systemd/system/mechanical-tv.service
 systemctl daemon-reload
 systemctl enable --now mechanical-tv.service
-if ! systemctl is-active --quiet mechanical-tv.service; then
-  echo 'Startup failed. Inspect: journalctl -u mechanical-tv -n 100' >&2
+configured_port="$(sed -n 's/^MTV_PORT=//p' /etc/mechanical-tv/environment)"
+if [[ ! "$configured_port" =~ ^[0-9]+$ ]]; then
+  echo 'MTV_PORT must be a numeric port in /etc/mechanical-tv/environment.' >&2
   exit 1
 fi
-echo 'HDMI capture service started; this does not prove an HDMI signal is present.'
-echo 'Inspect /var/lib/mechanical-tv/live/capture.json and journalctl -u mechanical-tv.'
-echo 'No AP, browser, application password, or desktop login is required.'
+healthy=false
+for attempt in {1..20}; do
+  if curl --fail --silent --max-time 2 "http://127.0.0.1:$configured_port/healthz" >/dev/null; then
+    healthy=true
+    break
+  fi
+  sleep 1
+done
+if [[ "$healthy" != true ]]; then
+  echo 'Startup check failed. Inspect: journalctl -u mechanical-tv -n 100' >&2
+  if [[ -n "$previous_release" && "$previous_release" != /opt/mechanical-tv/current && -d "$previous_release" ]]; then
+    ln -sfn "$previous_release" /opt/mechanical-tv/current
+    systemctl restart mechanical-tv.service
+    echo 'Restored the previous application directory. Check service health before use.' >&2
+  fi
+  exit 1
+fi
+echo 'Mechanical TV is running in REALTIME mode.'
+echo "Open http://$(hostname).local:$configured_port or http://<Pi-IP-address>:$configured_port"
+echo 'No desktop login is required after reboot. See docs/INSTALL.md for hotspot setup.'

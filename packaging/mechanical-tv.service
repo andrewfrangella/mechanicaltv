@@ -1,6 +1,6 @@
 [Unit]
-Description=Mechanical TV HDMI capture (hardware output disabled)
-After=local-fs.target
+Description=Mechanical TV realtime hardware appliance
+After=network.target
 StartLimitIntervalSec=120
 StartLimitBurst=5
 
@@ -8,12 +8,12 @@ StartLimitBurst=5
 Type=simple
 User=mechanical-tv
 Group=mechanical-tv
-SupplementaryGroups=video
+SupplementaryGroups=i2c gpio video
 WorkingDirectory=/opt/mechanical-tv/current
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=/etc/mechanical-tv/environment
-ExecStart=/usr/bin/python3 -m mechanical_tv.capture
+ExecStart=/usr/bin/python3 -m mechanical_tv.server serve
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=15
@@ -22,20 +22,18 @@ UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=false
-DevicePolicy=closed
-DeviceAllow=char-video4linux rw
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/mechanical-tv
 ProtectKernelTunables=true
-ProtectKernelModules=true
+ProtectKernelModules=false
 ProtectControlGroups=true
 RestrictSUIDSGID=true
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 MemoryMax=768M
 TasksMax=64
 CPUQuota=150%
-Nice=5
+Nice=-5
 StandardOutput=journal
 StandardError=journal
 

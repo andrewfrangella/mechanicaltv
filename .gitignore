@@ -4,3 +4,7 @@ __pycache__/
 data/
 .coverage
 playwright-report/
+.dmux/
+.dmux-hooks/
+.DS_Store
+*.tar.gz

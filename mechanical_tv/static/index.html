@@ -1,21 +1,262 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mechanical TV</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Mechanical TV — Realtime Hardware Studio</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
 <body>
-<header><div><span class="eyebrow">EXPERIMENTAL TELEVISION / 001</span><h1>Mechanical<span>TV</span></h1></div><div class="badge">SIMULATION · NO HARDWARE OUTPUT</div></header>
+<header>
+  <div>
+    <span class="eyebrow">EXPERIMENTAL MECHANICAL TELEVISION / 001</span>
+    <h1>Mechanical<span>TV</span></h1>
+  </div>
+  <div id="hw-badge" class="badge">REALTIME · NEMA 17 & LED SYNC</div>
+</header>
 <div id="notice" role="status" aria-live="polite"></div>
 <main>
-<section id="login" class="card login"><span class="eyebrow">YOUR LOCAL DISPLAY STUDIO</span><h2>Connect to the television.</h2><p>Sign in with the application password created during installation.</p><form id="login-form"><label for="password">Application password</label><input id="password" type="password" autocomplete="current-password" required minlength="12"><button type="submit" class="primary">Open studio ↗</button></form></section>
-<div id="studio" hidden>
-<nav aria-label="Main navigation"><button data-tab="player" class="active">01 / Player</button><button data-tab="library">02 / Library</button><button data-tab="system">03 / System</button><button id="logout">Sign out</button></nav>
-<section id="player" class="page">
-<div class="section-title"><div><span class="eyebrow">ON THE TURNTABLE</span><h2 id="selected-name">Select a video to begin.</h2></div><span id="play-state" class="pill">IDLE</span></div>
-<div class="previews"><article class="card"><div class="card-title"><h3>Source</h3><span>VIDEO PROXY · SILENT</span></div><div class="screen"><video id="source" muted playsinline preload="metadata" aria-label="Source video preview"></video><p id="source-empty">Your original image, before the scan.</p></div></article><article class="card"><div class="card-title"><h3>TV image</h3><span>32 × 25 / GRAYSCALE</span></div><div class="screen scan"><canvas id="pixels" width="32" height="25" aria-label="Simulated mechanical TV image"></canvas></div></article></div>
-<section class="card controls"><div class="timeline"><span id="position">0:00</span><input id="seek" aria-label="Playback position" type="range" min="0" max="1" step="0.1" value="0"><span id="duration">0:00</span></div><div class="control-row"><div class="buttons"><button id="play" class="primary">▶ Play</button><button id="pause">Ⅱ Pause</button><button id="stop">■ Stop</button></div><label class="inline"><input type="checkbox" id="loop" checked> Loop video</label><label class="inline" for="brightness">Brightness <input type="range" id="brightness" min="0" max="100" value="70"><output id="brightness-value">70%</output></label></div><p class="muted">Playback continues when this browser closes. Stop blanks the simulated display. This preview does not verify physical timing or image quality.</p></section>
-<div class="details"><span id="connection">● Connected</span><span>Profile: 32 × 25 · 10 fps</span><span>Hardware: disabled</span><span id="storage"></span></div>
-</section>
-<section id="library" class="page" hidden><div class="section-title"><div><span class="eyebrow">PREPARE SOMETHING TO WATCH</span><h2>Your video collection.</h2></div></div><section class="card upload"><form id="upload-form"><label for="file">Choose a video</label><input id="file" type="file" accept="video/mp4,video/webm,video/quicktime,video/x-matroska,video/x-msvideo" required><div class="control-row"><label class="inline" for="fit">Framing <select id="fit"><option value="fit">Fit — preserve the whole image</option><option value="crop">Crop — fill the display from the center</option></select></label><button type="submit" class="primary" id="upload-button">Upload & prepare ↗</button><button type="button" id="cancel-upload" hidden>Cancel upload</button></div><progress id="upload-progress" max="100" value="0" hidden></progress><p id="upload-status" aria-live="polite">Up to 256 MiB, 10 minutes, 1920 pixels per side. MP4/H.264 recommended. Audio is not used.</p></form></section><div id="library-list" class="library-list"></div></section>
-<section id="system" class="page" hidden><div class="section-title"><div><span class="eyebrow">UNDER THE HOOD</span><h2>System health.</h2></div><a class="button" href="/api/diagnostics" download>Download diagnostics ↓</a></div><div id="health" class="health-grid"></div><section class="card"><h3>About this release</h3><p>Version 0.1.0 runs entirely in simulation. Motor controls, encoder feedback, calibration, automatic hotspot setup, and browser shutdown are planned; they are not connected or implemented here.</p><p>All signed-in browsers share one player. In this first version, the most recent command wins. Use one operator at a time.</p><p>Use the installation guide for networking, service recovery, and safe Pi shutdown.</p></section></section>
-</div>
-</main><footer><span>MECHANICAL TV LAB</span><span>LOCAL FILES. LOCAL PLAYBACK. NO CLOUD.</span></footer>
-</body></html>
+  <section id="login" class="card login">
+    <span class="eyebrow">LOCAL DISPLAY STUDIO</span>
+    <h2>Connect to the television.</h2>
+    <p>Sign in with the application password created during installation.</p>
+    <form id="login-form">
+      <label for="password">Application password</label>
+      <input id="password" type="password" autocomplete="current-password" required minlength="12">
+      <button type="submit" class="primary">Open studio ↗</button>
+    </form>
+  </section>
+
+  <div id="studio" hidden>
+    <nav aria-label="Main navigation">
+      <button data-tab="realtime" class="active">01 / Realtime Studio</button>
+      <button data-tab="library">02 / Media Library</button>
+      <button data-tab="system">03 / System & Telemetry</button>
+      <button id="logout">Sign out</button>
+    </nav>
+
+    <!-- REALTIME TAB -->
+    <section id="realtime" class="page">
+      <div class="section-title">
+        <div>
+          <span class="eyebrow">LIVE TELEVISION ENGINE</span>
+          <h2 id="stream-name">Live HDMI Capture</h2>
+        </div>
+        <div class="pill-group">
+          <span id="motor-pill" class="pill idle">MOTOR: IDLE</span>
+          <span id="sync-pill" class="pill idle">SYNC: UNLOCKED</span>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:16px; padding:16px 20px;">
+        <div class="control-row">
+          <label class="inline" for="video-source">
+            <b>Video Input:</b>
+            <select id="video-source">
+              <option value="hdmi">Live HDMI Video (/dev/video0)</option>
+              <option value="smpte_bars" selected>Test Pattern: SMPTE Grayscale Bars</option>
+              <option value="grayscale_ramp">Test Pattern: Horizontal Gray Ramp</option>
+              <option value="vertical_ramp">Test Pattern: Vertical Gray Ramp</option>
+              <option value="grid">Test Pattern: Aperture Grid & Crosshair</option>
+              <option value="rotating_bar">Test Pattern: Rotating Phase Sync Bar</option>
+              <option value="pulse_test">Test Pattern: 1Hz Photodiode Pulse Test</option>
+              <option value="checkerboard">Test Pattern: 4x4 Checkerboard</option>
+              <option value="single_column">Test Pattern: Sweeping Column</option>
+              <option value="library">Selected Media Library Clip</option>
+            </select>
+          </label>
+          <span id="source-status-text" class="eyebrow">ACTIVE PATTERN</span>
+        </div>
+      </div>
+
+      <div class="previews">
+        <article class="card">
+          <div class="card-title">
+            <h3>Source Video</h3>
+            <span id="source-format-label">HDMI / PROXY</span>
+          </div>
+          <div class="screen">
+            <video id="source" muted playsinline preload="metadata" aria-label="Source video stream"></video>
+            <canvas id="source-canvas" width="32" height="25" style="display:none;"></canvas>
+            <p id="source-empty">Active source video preview.</p>
+          </div>
+        </article>
+        <article class="card">
+          <div class="card-title">
+            <h3>Mechanical TV Image</h3>
+            <span>32 × 25 / 800 PIXELS / GRAYSCALE</span>
+          </div>
+          <div class="screen scan">
+            <canvas id="pixels" width="32" height="25" aria-label="Mechanical TV optical projection"></canvas>
+          </div>
+        </article>
+      </div>
+
+      <!-- HUD TELEMETRY GRID -->
+      <div class="hud-grid">
+        <div class="hud-item">
+          <span>TARGET SPEED</span>
+          <b id="telem-target-rpm">600 RPM</b>
+        </div>
+        <div class="hud-item">
+          <span>MEASURED SPEED</span>
+          <b id="telem-measured-rpm">0.0 RPM</b>
+        </div>
+        <div class="hud-item">
+          <span>SYNC LOCK</span>
+          <b id="telem-lock">UNLOCKED</b>
+        </div>
+        <div class="hud-item">
+          <span>OPTO JITTER</span>
+          <b id="telem-jitter">0.00 ms</b>
+        </div>
+        <div class="hud-item">
+          <span>LED DUTY CYCLE</span>
+          <b id="telem-duty">0.0%</b>
+        </div>
+        <div class="hud-item">
+          <span>SAFETY WATCHDOG</span>
+          <b id="telem-watchdog">ARMED</b>
+        </div>
+      </div>
+
+      <!-- MOTOR & HARDWARE CONTROLS -->
+      <section class="card controls">
+        <div class="control-row">
+          <div class="buttons">
+            <button id="rt-start" class="primary">▶ Spin Up Motor</button>
+            <button id="rt-stop">■ Stop Motor</button>
+            <button id="rt-blank" class="danger">⚠ Emergency Blank</button>
+          </div>
+          <div class="inline">
+            <label for="rt-speed">Speed:</label>
+            <input type="range" id="rt-speed" min="1.0" max="15.0" step="0.1" value="10.0">
+            <output id="rt-speed-val">10.0 FPS (600 RPM)</output>
+          </div>
+          <div class="inline">
+            <label for="rt-bright">LED Brightness:</label>
+            <input type="range" id="rt-bright" min="0" max="100" value="70">
+            <output id="rt-bright-val">70%</output>
+          </div>
+        </div>
+      </section>
+
+      <!-- TIMELINE & MEDIA PLAYBACK -->
+      <section id="timeline-card" class="card controls">
+        <div class="timeline">
+          <span id="position">0:00</span>
+          <input id="seek" aria-label="Playback position" type="range" min="0" max="1" step="0.1" value="0">
+          <span id="duration">0:00</span>
+        </div>
+        <div class="control-row">
+          <div class="buttons">
+            <button id="play" class="primary">▶ Play</button>
+            <button id="pause">Ⅱ Pause</button>
+            <button id="stop">■ Stop</button>
+          </div>
+          <span id="play-state" class="pill" style="display:none;">IDLE</span>
+          <label class="inline"><input type="checkbox" id="loop" checked> Loop clip</label>
+          <label class="inline" for="brightness" style="display:none;">Brightness <input type="range" id="brightness" min="0" max="100" value="70"><output id="brightness-value">70%</output></label>
+        </div>
+      </section>
+
+      <!-- OPTICAL CALIBRATION & PHASE ALIGNMENT -->
+      <section class="card">
+        <div class="section-title">
+          <div>
+            <span class="eyebrow">OPTICAL GEOMETRY & PHASE SYNCHRONIZATION</span>
+            <h3>Nipkow Disc Calibration</h3>
+          </div>
+        </div>
+        <p class="muted" style="margin-top:0;">Adjust phase offset (horizontal hold) to align the optical index notch with the display window. Compensate for rotational direction and optical gamma.</p>
+        <div class="calibration-grid">
+          <label class="inline">
+            Phase Offset:
+            <input type="range" id="cal-phase" min="0" max="799" value="0">
+            <output id="cal-phase-val">0 px (0°)</output>
+          </label>
+          <label class="inline">
+            Gamma:
+            <input type="range" id="cal-gamma" min="0.5" max="3.0" step="0.1" value="1.8">
+            <output id="cal-gamma-val">1.8</output>
+          </label>
+          <label class="inline">
+            Contrast:
+            <input type="range" id="cal-contrast" min="0.5" max="2.5" step="0.1" value="1.0">
+            <output id="cal-contrast-val">1.0</output>
+          </label>
+          <label class="inline">
+            <input type="checkbox" id="cal-inv-x"> Invert Horizontal (Flip X)
+          </label>
+          <label class="inline">
+            <input type="checkbox" id="cal-inv-y"> Invert Vertical (Flip Y)
+          </label>
+        </div>
+      </section>
+
+      <div class="details">
+        <span id="connection">● Connected</span>
+        <span>Profile: 32 × 25 · 800 px/rev</span>
+        <span id="hw-status-label">Hardware: Active</span>
+        <span id="storage"></span>
+      </div>
+    </section>
+
+    <!-- LIBRARY TAB -->
+    <section id="library" class="page" hidden>
+      <div class="section-title">
+        <div>
+          <span class="eyebrow">STORED MEDIA COLLECTION</span>
+          <h2>Your video collection.</h2>
+        </div>
+      </div>
+      <section class="card upload">
+        <form id="upload-form">
+          <label for="file">Choose a video</label>
+          <input id="file" type="file" accept="video/mp4,video/webm,video/quicktime,video/x-matroska,video/x-msvideo" required>
+          <div class="control-row">
+            <label class="inline" for="fit">Framing
+              <select id="fit">
+                <option value="fit">Fit — preserve whole aspect ratio</option>
+                <option value="crop">Crop — center crop to 32×25</option>
+              </select>
+            </label>
+            <button type="submit" class="primary" id="upload-button">Upload & prepare ↗</button>
+            <button type="button" id="cancel-upload" hidden>Cancel upload</button>
+          </div>
+          <progress id="upload-progress" max="100" value="0" hidden></progress>
+          <p id="upload-status" aria-live="polite">Up to 256 MiB, 10 minutes, 1920 pixels. Converts to 32 × 25 10 fps grayscale frames.</p>
+        </form>
+      </section>
+      <div id="library-list" class="library-list"></div>
+    </section>
+
+    <!-- SYSTEM TAB -->
+    <section id="system" class="page" hidden>
+      <div class="section-title">
+        <div>
+          <span class="eyebrow">HARDWARE & SYSTEM HEALTH</span>
+          <h2>Diagnostics and telemetry.</h2>
+        </div>
+        <a class="button" href="/api/diagnostics" download>Download diagnostics ↓</a>
+      </div>
+      <div id="health" class="health-grid"></div>
+      <section class="card">
+        <h3>Apparatus Configuration</h3>
+        <p><strong>Main Computer:</strong> Raspberry Pi 4 Model B</p>
+        <p><strong>Motor Controller:</strong> Adafruit DC & Stepper Motor HAT (PCA9685 I2C @ 0x60, TB6612 dual H-bridge)</p>
+        <p><strong>Drive Motor:</strong> STEPPERONLINE NEMA 17 Bipolar Stepper (200 full steps / 400 half-steps per rev)</p>
+        <p><strong>Index Sensor:</strong> Photoelectric opto-interrupter on BCM GPIO 4</p>
+        <p><strong>Light Source:</strong> 3W High-power LED modulated via L298N on BCM GPIO 21 / SPI MOSI</p>
+        <p><strong>Thermal Protection:</strong> Hardware stall watchdog forces LED power cut if disc rotation falls below 1.0 FPS or opto pulses cease.</p>
+      </section>
+    </section>
+  </div>
+</main>
+<footer>
+  <span>MECHANICAL TELEVISION LAB</span>
+  <span>REALTIME HARDWARE SYNCHRONIZATION</span>
+</footer>
+</body>
+</html>

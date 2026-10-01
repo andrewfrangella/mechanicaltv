@@ -1,50 +1,52 @@
-# Project plan and scope record
+# Project Plan and Scope Record
 
-## Intended experience
+## Intended Experience
 
-Power on → receive HDMI through USB capture → convert continuously → preview latest frame → future synchronized mechanical output → shut down.
+Power on → join Wi-Fi → open local page → sign in → choose input (Live HDMI / Test Pattern / Library) → calibrate phase & optics → spin up motor → watch synchronized mechanical video → safe stop / shut down.
 
-No access point, browser, login or upload is required. The original web upload studio is retained for development only. HDMI ingestion is now the primary software path; hardware output has not started.
+---
 
-## Implementation status
+## Implementation Status
 
-| Feature | Version 0.1.0 | Follow-up |
-| --- | --- | --- |
-| Password-protected local GUI | Implemented | HTTPS deployment if needed |
-| Upload and persistent library | Implemented | Resume upload, thumbnails, rename |
-| Fit / center crop | Implemented before upload | Interactive crop positioning and reprepare |
-| 32 × 25 grayscale conversion | Implemented, fixed 10 fps | Profiles, gamma, contrast, orientation |
-| Source and prepared previews | Implemented | Improved timeline synchronization |
-| Play/pause/stop/seek/loop/brightness | Simulation implemented | Physical output adapter |
-| Automatic startup | Installer and unit supplied | Validate on Pi OS |
-| HDMI capture | Headless V4L2 conversion and retry implemented | Validate actual adapter and Pi |
-| Health and diagnostics | Basic implementation | Throttling, memory, buffer/encoder telemetry |
-| Self-test | CLI dependency check and automated tests | Browser-initiated full appliance self-test |
-| Multiple browsers | Shared state; last command wins | Explicit operator ownership |
-| Update/recovery | Installer preserves data and previous code | Release tooling and migration-aware rollback |
-| Safe shutdown | OS/SSH instructions | Narrow privileged helper and UI action |
-| Motor/LED/encoder integration | Not implemented | Hardware selection, wiring, measurement |
-| Calibration page | Not implemented | Test patterns, phase, scan direction, limits |
-| RGB, audio | Not implemented | After grayscale physical playback |
+| Feature | Version 0.1.0 | Version 0.2.0 (Realtime First) | Follow-up |
+| --- | --- | --- | --- |
+| Password-protected local GUI | Implemented | Implemented | HTTPS deployment if requested |
+| Live HDMI video capture | Not implemented | **Implemented (V4L2 `/dev/video0`)** | Auto-resolution negotiation |
+| Procedural calibration patterns | Not implemented | **Implemented (SMPTE, Ramp, Grid, Rotating Bar, Pulse)** | Custom SVG/vector patterns |
+| Nipkow coordinate serializer | Not implemented | **Implemented (bitluni spiral mapping $32 \times 25$)** | Custom disc spiral profiles |
+| Motor control & ramping | Not implemented | **Implemented (Adafruit Motor HAT + NEMA 17)** | Direct STEP/DIR driver option |
+| Closed-loop opto sync (PLL) | Not implemented | **Implemented (GPIO 4 index edge + speed trim)** | Microsecond hardware timestamping |
+| High-power LED pulse modulation | Not implemented | **Implemented (GPIO 21 & SPI MOSI DMA)** | 3-channel RGB sequencing |
+| Thermal & stall safety watchdog | Not implemented | **Implemented (350 ms timeout + stall cut)** | Hardware watchdog timer |
+| Optical calibration & framing hold | Not implemented | **Implemented (phase offset, invert X/Y, gamma)** | Auto-centering via photodiode |
+| Upload & persistent library | Implemented | Implemented | Resume upload, rename |
+| Source and prepared previews | Implemented | **Implemented (Live HUD + TV canvas monitor)** | Low-latency WebRTC stream |
+| Automatic systemd startup | Simulation unit | **Updated with hardware permissions (I2C/GPIO/V4L2)** | Validate on physical Pi OS |
+| Diagnostics & Telemetry | Basic | **Full telemetry (RPM, target, sync lock, jitter, duty)** | Long-term jitter logging |
 
-There is no fake motor speed readout, simulated “sync lock,” or working-looking hardware control in the UI. The simulation label remains visible.
+---
 
 ## Milestones
 
-1. **Local simulation:** validate authentication, uploads, real FFmpeg conversion, previews, controls, persistence and failure handling.
-2. **Pi software acceptance:** run installer on the actual Pi, reboot, test offline HDMI capture, run an extended loop, verify temperature/resource behavior, test interrupted work.
-3. **Hardware bring-up:** confirm component compatibility and wiring; test motor/index separately from LED; measure timing. Select a driver architecture based on evidence.
-4. **Static optical image:** bars/gradient, scan direction, phase, brightness and distortion calibration.
-5. **Physical grayscale video:** bounded buffering, measured synchronization, fault handling, realistic frame-rate/brightness limits.
-6. **Optional features:** richer calibration, RGB, kiosk and appliance packaging.
-
-## Decisions still open
-
-- Pi-only timing versus a dedicated controller.
-- Final motor driver and LED current-limiting circuit.
-- Exact disk geometry and physical safe operating range.
-- Hardware watchdog and loss-of-sync response.
-- Whether physical Pause holds an image while the disk spins.
-- Repository license, release policy, and distribution of any upstream assets.
-
-The first release's reduced service structure and absent setup wizard are intentional documented scope changes from the initial concept, not completed features. Future work should update this table and validation evidence together.
+1. **Local Simulation (Completed):** Validated authentication, media preparation, previews, controls, persistence, and error recovery.
+2. **Realtime Architecture & Drivers (Completed):**
+   - Implemented V4L2 HDMI video ingest and procedural test patterns.
+   - Built Adafruit Motor HAT (PCA9685/TB6612) driver with velocity ramping to 600 RPM.
+   - Built optical index sensor edge timing and closed-loop PLL.
+   - Built 800-pixel LED pulse modulator matching bitluni's geometry with thermal watchdog protection.
+   - Updated web studio with real-time HUD telemetry, motor controls, and optical calibration.
+3. **Physical Hardware Bring-Up (Current Step):**
+   - Wire Adafruit Motor HAT, NEMA 17 motor, optical sensor, and L298N LED driver as specified in `docs/HARDWARE.md`.
+   - Run installer on Raspberry Pi 4 Model B and verify I2C detection (`i2cdetect -y 1`).
+   - Spin up motor with disk attached and observe velocity ramp to 600 RPM.
+4. **Optical Calibration & Static Image:**
+   - Display SMPTE bars and aperture grid test pattern.
+   - Dial phase offset slider to center the frame in the aperture.
+   - Verify scan direction (toggle Invert Horizontal/Vertical if necessary).
+5. **Live HDMI Video Playback:**
+   - Connect HDMI video source to USB capture card.
+   - Select "Live HDMI Video" in web studio.
+   - Enjoy real-time mechanical television display.
+6. **Optional Enhancements:**
+   - Sequential RGB 3-color flashing for color mechanical TV.
+   - Hardware kiosk mode and automatic captive portal hotspot.

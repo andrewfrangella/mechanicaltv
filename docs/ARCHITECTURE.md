@@ -1,89 +1,136 @@
-# Architecture and developer notes
+# Architecture and Realtime Synchronization
 
-The primary runtime is now `mechanical_tv.capture`, launched by systemd without networking. V4L2 → FFmpeg → bounded raw frame assembly → latest PGM and JSON status. It drains frames continuously, discards older complete frames in each read, retries EOF/stalls, and blanks on failure/shutdown. No database, authentication or HTTP is needed. The preview sink is the future hardware-adapter boundary; it does not drive hardware.
-
-The sections below describe the retained optional web studio.
-
-## Runtime
+## Runtime Architecture
 
 ```mermaid
-flowchart LR
-  Browser[Local browser] -->|HTTP, session cookie| Web[Python HTTP server]
-  Web --> Library[SQLite library and files]
-  Worker[Single background worker] --> Library
-  Worker --> FFmpeg[FFprobe / FFmpeg subprocesses]
-  Web --> Player[In-memory simulation player]
-  Player --> Frames[Prepared grayscale frames]
+flowchart TD
+  subgraph Inputs ["Video Input Sources"]
+    HDMI["Live HDMI Capture (/dev/video0)"]
+    Patterns["Procedural Test Patterns"]
+    LibraryClips["Uploaded Media Library"]
+  end
+
+  subgraph Pipeline ["Real-time Frame Pipeline"]
+    FramePipeline["FramePipeline (32 × 25 Grayscale, Gamma LUT)"]
+    NipkowMapper["Nipkow Coordinate Serializer (800 px/rev)"]
+  end
+
+  subgraph HardwareEngine ["Realtime Hardware Controller"]
+    MotorController["Adafruit Motor HAT Driver (PCA9685 @ 0x60)\nVelocity Ramping Engine"]
+    NEMA17["STEPPERONLINE NEMA 17 Stepper (600 RPM)"]
+    Disk["Nipkow Disk (32 Holes × 25 Lines)"]
+    OptoSensor["Photoelectric Index Sensor (GPIO 4)\nPeriod / RPM / PLL Speed Trim"]
+    LEDModulator["3W LED Pulse Modulator (GPIO 21 / SPI MOSI)\nThermal / Stall Safety Watchdog"]
+  end
+
+  subgraph WebApp ["Web Studio & API"]
+    HTTP["Python Threading HTTPServer"]
+    Browser["Operator Web UI (HUD, Preview, Controls)"]
+  end
+
+  HDMI --> FramePipeline
+  Patterns --> FramePipeline
+  LibraryClips --> FramePipeline
+  FramePipeline --> NipkowMapper
+
+  MotorController --> NEMA17 --> Disk
+  Disk -. Notch .- OptoSensor
+  OptoSensor -->|Revolution Sync Trigger| NipkowMapper
+  OptoSensor -->|Speed Trim| MotorController
+  NipkowMapper --> LEDModulator
+  LEDModulator -->|Light Pulses| Disk
+
+  HTTP <--> FramePipeline
+  HTTP <--> HardwareEngine
+  Browser <-->|HTTP JSON & Live Frames| HTTP
 ```
 
-Version 0.1.0 has one systemd service. Web requests are handled in threads, a worker thread schedules one conversion at a time, and FFmpeg does CPU-heavy conversion in separate processes. A thread lock protects playback state, each short database operation has a separate closed connection/transaction, and the browser polls the authoritative player.
+---
 
-This is a deliberate reduction from the initial three-service concept. It makes the first Pi installation smaller, but a whole-process failure also interrupts the player. Splitting the real output controller into a separate supervised process remains an appropriate next step when hardware work begins.
+## 1. Video Pipeline
 
-## Video pipeline
+1. **Ingest Modes:**
+   - **Live HDMI Capture:** Low-latency acquisition via V4L2 device (`/dev/video0`) using OpenCV VideoCapture or direct FFmpeg raw pipe.
+   - **Procedural Test Patterns:** Algorithmic patterns generated at target frame rate without external files (SMPTE grayscale bars, horizontal/vertical ramps, alignment grid with crosshair, rotating phase sync bar, 1 Hz photodiode pulse test).
+   - **Media Library:** Looping prepared 32 × 25 grayscale video files.
+2. **Normalization:**
+   - Downscaled to exactly 32 columns by 25 rows (800 bytes per frame).
+   - Formatted as 8-bit unsigned grayscale ($0 = \text{black}$, $255 = \text{white}$).
+   - Optical gamma correction applied via a precomputed 256-byte lookup table ($\gamma = 1.8$ default).
+   - Master brightness and contrast scaling applied.
+3. **Nipkow Coordinate Serialization:**
+   - Bitluni Archimedean spiral formula maps row-major raster images to the sequential light pulses corresponding to the 32 holes:
+     $$\text{For pixel index } i \in [0, 799]:$$
+     $$\text{Column } c = i // 25, \quad \text{Line } r = i \% 25$$
+     $$x = 31 - c \quad (\text{or } c \text{ if invert\_x}), \quad y = 24 - r \quad (\text{or } r \text{ if invert\_y})$$
+     $$\text{Shifted } i' = (i + \text{phase\_offset}) \pmod{800}$$
+   - Pre-computed 800-entry coordinate mapping executes in $< 5\ \mu\text{s}$ per frame.
 
-1. Authenticate and validate a fixed upload length. Enforce size, disk reserve, queue, and single-upload limits.
-2. Write `upload.part` under a UUID directory. On successful completion, rename to `original` and queue it.
-3. FFprobe validates stream presence, dimensions, and duration. Only MOV/MP4, Matroska/WebM and AVI demuxers and the local `file` protocol are allowed.
-4. FFmpeg normalizes to 10 fps, fits/pads or center-crops to 32 × 25, and emits gray8 frames.
-5. A second FFmpeg pass creates a silent, H.264/yuv420p, fast-start MP4 proxy, bounded to 480 pixels per side.
-6. Validate frame length/count; rename temporary outputs and record profile metadata before marking ready.
+---
 
-Conversions have timeouts and use limited thread counts. The systemd service also has memory/task/CPU limits. These are resource controls, not proof that arbitrary untrusted media is safe; keep the Pi's FFmpeg/security packages maintained and restrict users to the intended local group.
+## 2. Motor & Speed Control
 
-## Storage
+- **Driver:** Adafruit DC & Stepper Motor HAT (Mini Kit) featuring the PCA9685 16-channel 12-bit PWM controller communicating over I2C at address `0x60`, driving dual TB6612 H-bridge motor drivers.
+- **Motor:** STEPPERONLINE 17HE08-1004S NEMA 17 bipolar stepper motor (1.8° step angle, 200 full steps per revolution).
+- **Stepping Strategy:** 8-step half-step (interleave) commutation produces 400 half-steps per revolution, reducing mechanical resonance and vibration compared to full-stepping.
+- **Velocity Profiling (Acceleration Ramp):**
+  - Sudden acceleration stalls stepper motors due to disk inertia.
+  - The controller initiates rotation at a soft start speed of 1.0 FPS (60 RPM) and ramps speed up by `2.0 FPS/s` until reaching the target speed (default 10.0 FPS / 600 RPM).
+- **Power Management:** On motor stop, `release()` writes 0 to all PWM channels, de-energizing the coils to prevent idle heating.
 
-```text
-/var/lib/mechanical-tv/
-  auth.json                 # Salted password hash, mode 0600
-  media/
-    library.sqlite3
-    <uuid>/
-      original
-      preview.mp4
-      frames.raw
-      profile.json
-  backups/                  # Installer database backups, not complete media backups
-```
+---
 
-`frames.raw`: each consecutive frame is 800 unsigned bytes, row-major left-to-right, top-to-bottom. Zero is black, 255 is white. There is no header. `profile.json` supplies width, height, fps, frame count, framing, format and version. This is an image representation, **not an electrical waveform or bitluni wire protocol**. A future driver must map pixels to physical scan order, phase and blanking.
+## 3. Optical Index Feedback & PLL Sync
 
-The database stores generated ID, display name, status, prepared duration, frame count, framing, error and creation time. User settings such as loop/brightness and selected clip are intentionally reset on process restart in this release.
+- **Sensor:** Photoelectric optical interrupter mounted to detect a sync slot on the outer rim of the Nipkow disk once per revolution.
+- **Interrupt / Edge Processing:**
+  - Connected to BCM GPIO 4 (physical pin 7).
+  - High-resolution timestamping via `time.perf_counter()` on rising edges.
+  - Measures instantaneous revolution period $\Delta t$.
+  - Computes instantaneous and moving-average RPM ($60.0 / \Delta t$) and FPS ($1.0 / \Delta t$).
+  - Jitter measurement: standard deviation between target period and measured period.
+- **Sync Lock:**
+  - When measured FPS is within $\pm 3\%$ of target FPS and jitter is $< 2.0\text{ ms}$ across 5 consecutive revolutions, `sync_locked` is asserted.
+- **Closed-Loop Speed Trim (PLL):**
+  - Period error $e_p = T_{target} - T_{measured}$.
+  - Proportional adjustment trims the microsecond step delay: $\Delta \tau = K_p \times e_p$.
 
-## Playback
+---
 
-The player loads at most 4.8 MB of prepared data for a ten-minute clip. A monotonic clock determines position. Snapshots and commands advance elapsed time, avoiding accumulation of browser timer drift. There is no continuously toggled GPIO and no real-time output thread. With no browser polling, the next snapshot still computes the correct elapsed position; this is logical simulation, not unattended physical rendering.
+## 4. LED Pulse Modulator & Safety Interlock
 
-Pause freezes position. Stop resets and blanks. Seeking clamps to a valid frame. Loop wraps at the prepared duration. The source proxy is synchronized approximately in the browser; it is not an audio/video synchronization guarantee. Status polling is slower than the prepared frame rate, so some preview frames are skipped by design.
+- **Light Source:** 3W high-power white LED switched via L298N dual H-bridge from BCM GPIO 21 (or SPI MOSI Pin 19).
+- **Pixel Modulation:**
+  - At 10.0 FPS, 1 revolution takes 100 ms.
+  - 800 pixels per revolution means each pixel occupies a $125.0\ \mu\text{s}$ timeslot.
+  - Within each $125\ \mu\text{s}$ window, the LED is pulsed HIGH for duration:
+    $$t_{on} = 125.0\ \mu\text{s} \times \left(\frac{V_{pixel}}{255}\right) \times \text{Master Brightness}$$
+- **Zero-Jitter SPI Output Mode (Optional):**
+  - Uses Raspberry Pi hardware SPI MOSI (`/dev/spidev0.0`) via DMA at 2.0 MHz.
+  - Generates exact hardware bitstreams without software timing jitter.
+- **Thermal & Stall Safety Watchdog:**
+  - The optical index callback feeds a watchdog timer every revolution.
+  - If no index pulse is received within 350 ms, or if motor speed is $< 1.0\text{ FPS}$:
+    - The safety interlock trips immediately.
+    - LED output is forced LOW (`blank()`).
+    - Protects the 3D-printed PLA disk and 3W LED from thermal burnout.
 
-## HTTP API
+---
 
-All `/api/*` routes except login require a session. POST requests require `X-MTV-Request: 1`; cross-origin browser requests are not supported. JSON bodies are limited to 4096 bytes. Upload body is raw file bytes, not multipart.
+## 5. HTTP API
 
-| Method and route | Input / output |
+| Method & Route | Description |
 | --- | --- |
-| GET `/healthz` | Public minimal HTTP liveness and simulation mode |
-| POST `/api/login` | `{ "password": "..." }`; sets HttpOnly/SameSite cookie |
-| POST `/api/logout` | `{}`; invalidates session |
-| GET `/api/state` | Player state/pixels and library entries |
-| POST `/api/upload?name=clip.mp4&fit=fit` | Raw bytes with Content-Length; queues media |
-| POST `/api/player` | `{ "action": "select", "value": "<id>" }` or play/pause/stop/seek/brightness/loop |
-| POST `/api/delete` | `{ "id": "<id>" }`; no deletion of active conversion or playing clip |
-| GET `/api/preview/<id>` | Authenticated MP4 proxy with single byte-range support |
-| GET `/api/health` | Dependencies, worker, storage, uptime, mode |
-| GET `/api/diagnostics` | Downloadable sanitized health JSON |
-
-Sessions last 12 hours and are invalidated by restart. Login attempts are globally limited to ten per minute and concurrent sessions to 32. The server binds to loopback in development and loopback by default.
-
-## Boundaries
-
-- Trusted LAN deployment only. HTTP has no transport encryption. Do not reuse a valuable account password here, expose the service publicly, or assume session cookies secure it against network observers.
-- No privileged web actions. The service user cannot reconfigure Wi-Fi, install packages, shut down the OS, or access GPIO devices through the supplied systemd unit.
-- Static assets are local; restrictive CSP, no third-party scripts, no analytics, no CORS.
-- Fixed asset routes and validated UUID media paths; names render through `textContent`.
-- The Python stdlib server is intentionally small and has not been load-tested or hardened as a public internet server.
-- Physical loss-of-sync protection, watchdogs, timing accuracy and emergency stop need hardware-specific design and validation.
-
-## Extending output later
-
-Keep video preparation and UI independent of motor hardware. Introduce an output adapter that accepts prepared image frames and commands and reports measured state. Simulation, direct Pi output, and a Pi-to-microcontroller link can then share the media library. Do not claim a requested speed is a measured speed or map source fps directly to safe motor RPM without validating the disk.
+| `GET /healthz` | Public liveness probe and operation mode |
+| `POST /api/login` | Authenticate with application password |
+| `POST /api/logout` | Terminate session |
+| `GET /api/state` | Unified state: Player snapshot, Library items, Realtime telemetry |
+| `GET /api/realtime/status` | Comprehensive hardware status (RPM, Target, Lock, Jitter, Watchdog, LED Duty) |
+| `POST /api/realtime/control` | Hardware control commands (`start`, `stop`, `emergency_blank`, `speed`, `source`, `pattern`, `calibration`) |
+| `GET /api/realtime/frame` | Live 32 × 25 frame payload (800 bytes) for web canvas monitor |
+| `POST /api/upload` | Upload video file for background preparation |
+| `POST /api/player` | Media player commands (`play`, `pause`, `stop`, `seek`, `loop`, `brightness`) |
+| `POST /api/delete` | Delete prepared media clip |
+| `GET /api/preview/<id>` | Authenticated MP4 proxy preview stream |
+| `GET /api/health` | Hardware components, Pi temperature, storage, CPU load |
+| `GET /api/diagnostics` | Downloadable sanitized diagnostics JSON report |

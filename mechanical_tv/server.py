@@ -1,4 +1,4 @@
-"""Small authenticated local-network HTTP service; no third-party Python packages."""
+"""Authenticated local-network HTTP service with real-time hardware synchronization."""
 import argparse
 from collections import deque
 import getpass
@@ -18,7 +18,9 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
+from .capture import FramePipeline, WIDTH, HEIGHT, FRAME_PIXELS
 from .core import Library, Player, MAX_UPLOAD, RESERVE_BYTES
+from .hardware import RealtimeController, MockMotorDriver
 
 STATIC = Path(__file__).parent / 'static'
 
@@ -49,11 +51,29 @@ def set_password(root):
 
 
 class Application:
-    def __init__(self, root):
+    def __init__(
+        self,
+        root,
+        hdmi_device='/dev/video0',
+        motor_port=1,
+        opto_pin=4,
+        led_pin=21,
+        use_spi_led=False,
+        force_mock=False,
+    ):
         self.root = Path(root)
         self.auth = json.loads((self.root / 'auth.json').read_text())
         self.library = Library(self.root / 'media')
         self.player = Player(self.library)
+        self.pipeline = FramePipeline(hdmi_device=hdmi_device)
+        self.realtime = RealtimeController(
+            pipeline=self.pipeline,
+            motor_port=motor_port,
+            opto_pin=opto_pin,
+            led_pin=led_pin,
+            use_spi_led=use_spi_led,
+            force_mock=force_mock,
+        )
         self.sessions = {}
         self.session_lock = threading.Lock()
         self.attempts = deque()
@@ -66,8 +86,8 @@ class Application:
     def work(self):
         while not self.stopping.wait(0.5):
             try:
-                # Do not begin new conversions during playback. Already-running jobs finish.
-                if self.player.snapshot()['state'] == 'playing':
+                # Do not begin new conversions during playback or active motor scanning.
+                if self.player.snapshot()['state'] == 'playing' or self.realtime.state in ('running', 'locked', 'ramping'):
                     continue
                 for item in self.library.items():
                     if item['status'] == 'queued':
@@ -75,6 +95,10 @@ class Application:
                         break
             except Exception as exc:
                 print(f'Worker error: {type(exc).__name__}', flush=True)
+
+    def close(self):
+        self.stopping.set()
+        self.realtime.close()
 
     def login(self, password):
         with self.session_lock:
@@ -104,14 +128,31 @@ class Application:
             temperature = int(Path('/sys/class/thermal/thermal_zone0/temp').read_text()) / 1000
         except (OSError, ValueError):
             pass
-        return {'version': __version__, 'mode': 'simulation', 'hardware_enabled': False,
-                'uptime_seconds': int(time.monotonic() - self.started),
-                'worker_alive': self.worker.is_alive(), 'disk_free_bytes': disk.free,
-                'disk_total_bytes': disk.total, 'temperature_c': temperature,
-                'load_average': os.getloadavg(), 'ffmpeg': bool(shutil.which('ffmpeg')),
-                'ffprobe': bool(shutil.which('ffprobe')),
-                'profile': {'width': 32, 'height': 25, 'fps': 10},
-                'limitations': ['No GPIO output', 'No measured RPM or synchronization', 'No physical timing validation']}
+        rt_status = self.realtime.get_status()
+        hw_enabled = not isinstance(self.realtime.motor.driver, MockMotorDriver)
+        return {
+            'version': __version__,
+            'mode': 'realtime' if hw_enabled else 'realtime-simulation',
+            'hardware_enabled': hw_enabled,
+            'uptime_seconds': int(time.monotonic() - self.started),
+            'worker_alive': self.worker.is_alive(),
+            'disk_free_bytes': disk.free,
+            'disk_total_bytes': disk.total,
+            'temperature_c': temperature,
+            'load_average': os.getloadavg(),
+            'ffmpeg': bool(shutil.which('ffmpeg')),
+            'ffprobe': bool(shutil.which('ffprobe')),
+            'profile': {'width': WIDTH, 'height': HEIGHT, 'fps': self.realtime.target_fps},
+            'realtime': rt_status,
+            'hardware': {
+                'computer': 'Raspberry Pi 4 Model B',
+                'motor_hat': 'Adafruit DC & Stepper Motor HAT (PCA9685 @ 0x60)',
+                'motor': 'NEMA 17 Stepper (200 steps/rev)',
+                'opto_sensor': f'Photoelectric index on GPIO {self.realtime.sensor.pin}',
+                'led_modulator': f'High-power LED on GPIO {self.realtime.led.pin}',
+                'hdmi_input': str(self.realtime.pipeline.hdmi.device)
+            }
+        }
 
 
 class Server(ThreadingHTTPServer):
@@ -176,12 +217,33 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
                 return
             if path == '/healthz':
-                self.reply({'status': 'ok', 'mode': 'simulation'})
+                self.reply({'status': 'ok', 'mode': self.app.health()['mode']})
                 return
             if not self.require_auth():
                 return
             if path == '/api/state':
-                self.reply({'player': self.app.player.snapshot(), 'library': self.app.library.items()})
+                player_snap = self.app.player.snapshot()
+                rt_status = self.app.realtime.get_status()
+                preview_frame = self.app.realtime.get_preview_frame()
+                if preview_frame and any(preview_frame):
+                    player_snap['pixels'] = list(preview_frame)
+                if rt_status['state'] in ('running', 'ramping', 'locked'):
+                    player_snap['state'] = rt_status['state']
+                self.reply({
+                    'player': player_snap,
+                    'library': self.app.library.items(),
+                    'realtime': rt_status
+                })
+            elif path == '/api/realtime/status':
+                self.reply(self.app.realtime.get_status())
+            elif path == '/api/realtime/frame':
+                frame = self.app.realtime.get_preview_frame()
+                self.reply({
+                    'width': WIDTH,
+                    'height': HEIGHT,
+                    'pixels': list(frame),
+                    'status': self.app.realtime.get_status()
+                })
             elif path == '/api/health':
                 self.reply(self.app.health())
             elif path == '/api/diagnostics':
@@ -273,13 +335,66 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/upload':
                 self.upload()
                 return
+
             body = self.json_body()
+
+            if path == '/api/realtime/control':
+                action = body.get('action')
+                if action == 'start':
+                    self.app.realtime.start()
+                elif action == 'stop':
+                    self.app.realtime.stop()
+                elif action == 'emergency_blank':
+                    self.app.realtime.emergency_blank()
+                elif action == 'speed':
+                    val = body.get('fps', body.get('value', 10.0))
+                    if not isinstance(val, (int, float)) or not math.isfinite(val):
+                        raise ValueError('Invalid speed value')
+                    self.app.realtime.set_target_fps(float(val))
+                elif action == 'source':
+                    mode = body.get('mode', 'hdmi')
+                    clip_id = body.get('id')
+                    path_str = None
+                    if clip_id:
+                        item = self.app.library.get(clip_id)
+                        if item['status'] != 'ready':
+                            raise ValueError('Selected video is not ready')
+                        path_str = str(self.app.library.root / clip_id / 'frames.raw')
+                    self.app.realtime.set_source_mode(mode, library_path=path_str)
+                elif action == 'pattern':
+                    pattern = body.get('pattern', 'smpte_bars')
+                    self.app.realtime.set_pattern(pattern)
+                elif action == 'calibration':
+                    self.app.realtime.set_calibration(
+                        phase_offset=body.get('phase_offset'),
+                        invert_x=body.get('invert_x'),
+                        invert_y=body.get('invert_y'),
+                        gamma=body.get('gamma'),
+                        brightness=body.get('brightness'),
+                        contrast=body.get('contrast'),
+                    )
+                else:
+                    raise ValueError(f'Unknown realtime action: {action}')
+                self.reply({'ok': True, 'status': self.app.realtime.get_status()})
+                return
+
             if path == '/api/player':
+                action = body.get('action')
                 value = body.get('value')
-                if body.get('action') in ('seek', 'brightness'):
+                if action in ('seek', 'brightness'):
                     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                         raise ValueError('Expected a finite number')
-                self.app.player.command(body.get('action'), value)
+                self.app.player.command(action, value)
+                if action == 'select' and value:
+                    clip_path = str(self.app.library.root / value / 'frames.raw')
+                    self.app.realtime.set_source_mode('library', library_path=clip_path)
+                elif action == 'play':
+                    if self.app.realtime.state == 'idle':
+                        self.app.realtime.start()
+                elif action == 'stop':
+                    self.app.realtime.stop()
+                elif action == 'brightness':
+                    self.app.realtime.set_calibration(brightness=float(value))
                 self.reply({'ok': True})
             elif path == '/api/delete':
                 with self.app.player.lock:
@@ -344,34 +459,58 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Mechanical TV simulation appliance')
+    parser = argparse.ArgumentParser(description='Mechanical TV realtime hardware appliance')
     parser.add_argument('command', choices=['init', 'serve', 'reset-password', 'doctor'], nargs='?', default='serve')
     parser.add_argument('--data', default=os.environ.get('MTV_DATA', './data'))
     parser.add_argument('--host', default=os.environ.get('MTV_HOST', '127.0.0.1'))
     parser.add_argument('--port', type=int, default=int(os.environ.get('MTV_PORT', '8080')))
+    parser.add_argument('--mock-hardware', action='store_true', default=bool(os.environ.get('MTV_MOCK_HARDWARE') == '1'))
+    parser.add_argument('--hdmi-device', default=os.environ.get('MTV_HDMI_DEVICE', '/dev/video0'))
+    parser.add_argument('--motor-port', type=int, default=int(os.environ.get('MTV_MOTOR_PORT', '1')))
+    parser.add_argument('--opto-pin', type=int, default=int(os.environ.get('MTV_OPTO_PIN', '4')))
+    parser.add_argument('--led-pin', type=int, default=int(os.environ.get('MTV_LED_PIN', '21')))
+    parser.add_argument('--spi-led', action='store_true', default=bool(os.environ.get('MTV_SPI_LED') == '1'))
     args = parser.parse_args()
+
     if args.command == 'init':
         initialize(args.data)
     elif args.command == 'reset-password':
         set_password(args.data)
         print('Restart the service to invalidate existing sessions and load the new password.')
     elif args.command == 'doctor':
-        results = {'python': os.sys.version.split()[0], 'ffmpeg': shutil.which('ffmpeg'), 'ffprobe': shutil.which('ffprobe'), 'auth_configured': (Path(args.data) / 'auth.json').exists(), 'data_exists': Path(args.data).is_dir()}
+        results = {
+            'python': os.sys.version.split()[0],
+            'ffmpeg': shutil.which('ffmpeg'),
+            'ffprobe': shutil.which('ffprobe'),
+            'auth_configured': (Path(args.data) / 'auth.json').exists(),
+            'data_exists': Path(args.data).is_dir(),
+            'i2c_available': os.path.exists('/dev/i2c-1'),
+            'hdmi_device_exists': os.path.exists(args.hdmi_device),
+        }
         print(json.dumps(results, indent=2))
-        raise SystemExit(0 if all(results.values()) else 1)
+        raise SystemExit(0 if results['auth_configured'] and results['data_exists'] else 1)
     else:
         if not (Path(args.data) / 'auth.json').exists():
             raise SystemExit('Run python3 -m mechanical_tv.server init first.')
-        app = Application(args.data)
+        app = Application(
+            args.data,
+            hdmi_device=args.hdmi_device,
+            motor_port=args.motor_port,
+            opto_pin=args.opto_pin,
+            led_pin=args.led_pin,
+            use_spi_led=args.spi_led,
+            force_mock=args.mock_hardware,
+        )
         server = Server((args.host, args.port), Handler)
         server.app = app
-        print(f'Mechanical TV {__version__}: http://{args.host}:{args.port} — SIMULATION ONLY', flush=True)
+        mode_str = "REALTIME HARDWARE" if not args.mock_hardware and os.path.exists('/dev/i2c-1') else "REALTIME EMULATION"
+        print(f'Mechanical TV {__version__}: http://{args.host}:{args.port} — {mode_str}', flush=True)
         try:
             server.serve_forever()
         except KeyboardInterrupt:
             pass
         finally:
-            app.stopping.set()
+            app.close()
             server.server_close()
 
 
