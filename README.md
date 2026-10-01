@@ -1,22 +1,18 @@
 # Mechanical TV
 
-A local web studio for a Raspberry Pi mechanical television based on [bitluni's design](https://github.com/bitluni/MechanicalTV).
+An HDMI-first Raspberry Pi mechanical television project based on [bitluni's design](https://github.com/bitluni/MechanicalTV).
 
 **Version 0.1.0 is a simulation release. It does not drive a motor, LED, encoder, or any GPIO.** It implements the media workflow before the physical output system is finalized. No Raspberry Pi or assembled-TV validation is claimed.
 
 ![Player showing a generated source test pattern and its 32 by 25 grayscale preview](docs/images/player-desktop.png)
 
-## What works
+## Primary operating flow
 
-- Password-protected, locally hosted interface with no cloud services or external frontend assets.
-- Upload a video; retain the original and prepare 32 × 25, 10 fps, 8-bit grayscale frames.
-- Fit or center-crop framing; MP4/H.264 recommended. MP4/MOV, Matroska/WebM, and AVI containers are accepted when FFmpeg can decode them.
-- Browser-compatible silent source proxy alongside the prepared pixel preview.
-- Select, play, pause, seek, stop, loop, and adjust simulated brightness.
-- Persistent SQLite library, one-at-a-time conversion, upload cancellation, and interrupted-job recovery.
-- Basic health display, sanitized diagnostics download, and a command-line dependency check.
-- Raspberry Pi OS installer and hardened systemd unit for automatic startup.
-- Automated tests covering conversion, authentication, media streaming, playback, and recovery.
+HDMI source → USB HDMI capture device → Raspberry Pi 4 / FFmpeg → 32 × 25 gray8 frames at 10 fps → latest-frame preview. Motor/LED output is a future integration step.
+
+The installer now starts unattended HDMI capture, without an AP connection, HTTP server, uploads, or application login. It retries missing/disconnected capture devices and blanks the preview on failure. No GPIO is accessed. See [installation](docs/INSTALL.md) for device selection and [hardware](docs/HARDWARE.md) for the parts record.
+
+The existing web studio remains an optional development tool for prerecorded test clips. Its features and screenshots describe that secondary simulation path.
 
 ## Start on a development computer
 
@@ -51,15 +47,13 @@ cd mechanicaltv
 sudo bash install.sh
 ```
 
-The installer asks for an application password, installs dependencies, and starts the service. Open `http://<Pi-IP-address>:8080`. If the hostname is `mechanical-tv` and your network supports mDNS, `http://mechanical-tv.local:8080` also works.
-
-**The installer does not change Wi-Fi, hostname, firewall, or GPIO settings.** Use the [installation guide](docs/INSTALL.md) for networking and the optional standalone hotspot. Initial installation requires internet; normal operation does not.
+The installer installs capture dependencies and enables the HDMI service at boot. Inspect `/var/lib/mechanical-tv/live/capture.json` for capture state and `latest.pgm` for the converted frame. Initial installation needs internet; operation needs no network connection. Hardware output remains disabled.
 
 ## Documentation
 
 | Document | Contents |
 | --- | --- |
-| [Installation](docs/INSTALL.md) | Fresh Pi OS, setup, hotspot, updates, recovery, shutdown |
+| [Installation](docs/INSTALL.md) | Pi OS, HDMI capture setup, updates, shutdown |
 | [User guide](docs/USER_GUIDE.md) | Screens, uploads, playback behavior, limits, troubleshooting |
 | [Architecture](docs/ARCHITECTURE.md) | Components, API, storage, processing, security boundaries |
 | [Project plan](docs/PROJECT_PLAN.md) | Full intended flow and implemented/pending feature matrix |
@@ -81,10 +75,10 @@ The tests start a local HTTP server and generate their own short video. They do 
 - One managed service with a background worker and FFmpeg child processes. The earlier three-service architecture is a future option, not this release's deployment.
 - Maximum upload 256 MiB; maximum duration 10 minutes; maximum width and height 1920 pixels each. A 512 MiB disk reserve plus preparation headroom is enforced.
 - Conversion shows queued/preparing/ready/failed states, not a precise preparation percentage. Upload progress is measured.
-- Fixed profile: 32 × 25 at 10 fps. No hardware timing guarantees, RGB, HDMI capture, audio, calibration, or motor controls.
+- Fixed profile: 32 × 25 at 10 fps. No hardware timing guarantees, RGB, audio, calibration, or motor controls. HDMI capture requires Pi/device validation.
 - No automatic network wizard, browser shutdown, operator-control lease, automatic updater, or resumable uploads yet.
 - Signed-in browsers share one player; latest command wins. Closing a browser does not stop playback. Restarting the service returns to idle.
-- HTTP is intended for a trusted local network/hotspot only. Do not port-forward this server to the internet. HTTPS and hardened public hosting are outside this release.
+- HTTP is intended for a trusted local network only. Do not port-forward this server to the internet. HTTPS and hardened public hosting are outside this release.
 
 ## Attribution and licensing
 

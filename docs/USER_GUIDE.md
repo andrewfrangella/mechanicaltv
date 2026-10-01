@@ -1,3 +1,5 @@
+> This guide covers the optional web development studio. The default appliance uses unattended HDMI capture; see [INSTALL.md](INSTALL.md).
+
 # User guide
 
 ## Everyday flow

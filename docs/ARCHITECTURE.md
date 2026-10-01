@@ -1,5 +1,9 @@
 # Architecture and developer notes
 
+The primary runtime is now `mechanical_tv.capture`, launched by systemd without networking. V4L2 → FFmpeg → bounded raw frame assembly → latest PGM and JSON status. It drains frames continuously, discards older complete frames in each read, retries EOF/stalls, and blanks on failure/shutdown. No database, authentication or HTTP is needed. The preview sink is the future hardware-adapter boundary; it does not drive hardware.
+
+The sections below describe the retained optional web studio.
+
 ## Runtime
 
 ```mermaid
@@ -69,11 +73,11 @@ All `/api/*` routes except login require a session. POST requests require `X-MTV
 | GET `/api/health` | Dependencies, worker, storage, uptime, mode |
 | GET `/api/diagnostics` | Downloadable sanitized health JSON |
 
-Sessions last 12 hours and are invalidated by restart. Login attempts are globally limited to ten per minute and concurrent sessions to 32. The server binds to loopback in development and all interfaces in the provided appliance configuration.
+Sessions last 12 hours and are invalidated by restart. Login attempts are globally limited to ten per minute and concurrent sessions to 32. The server binds to loopback in development and loopback by default.
 
 ## Boundaries
 
-- Trusted LAN/hotspot deployment only. HTTP has no transport encryption. Do not reuse a valuable account password here, expose the service publicly, or assume session cookies secure it against network observers.
+- Trusted LAN deployment only. HTTP has no transport encryption. Do not reuse a valuable account password here, expose the service publicly, or assume session cookies secure it against network observers.
 - No privileged web actions. The service user cannot reconfigure Wi-Fi, install packages, shut down the OS, or access GPIO devices through the supplied systemd unit.
 - Static assets are local; restrictive CSP, no third-party scripts, no analytics, no CORS.
 - Fixed asset routes and validated UUID media paths; names render through `textContent`.
