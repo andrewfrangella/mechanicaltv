@@ -2,49 +2,40 @@
 
 ## Intended experience
 
-Power on → join Wi-Fi → open local page → sign in → upload → validate → choose framing → prepare → preview → play → stop → shut down.
+Power on → HDMI source into capture device → USB into Pi 4 → automatic grayscale conversion → future synchronized mechanical display.
 
-The Pi owns uploads and playback. Laptops/phones provide controls. Internet is only needed for installation/maintenance. The Pi should eventually be deployable as an appliance, but a custom OS is unnecessary: use Pi OS with an automatically started application.
+No AP connection, browser login, upload, or network is needed to operate the primary flow. Installation and maintenance may use temporary network access. The optional upload studio remains useful for file-based development and runs independently.
 
 ## Implementation status
 
-| Feature | Version 0.1.0 | Follow-up |
+| Feature | Status | Next validation/work |
 | --- | --- | --- |
-| Password-protected local GUI | Implemented | HTTPS deployment if needed |
-| Upload and persistent library | Implemented | Resume upload, thumbnails, rename |
-| Fit / center crop | Implemented before upload | Interactive crop positioning and reprepare |
-| 32 × 25 grayscale conversion | Implemented, fixed 10 fps | Profiles, gamma, contrast, orientation |
-| Source and prepared previews | Implemented | Improved timeline synchronization |
-| Play/pause/stop/seek/loop/brightness | Simulation implemented | Physical output adapter |
-| Automatic startup | Installer and unit supplied | Validate on Pi OS |
-| Standalone hotspot | Manual documented setup | Wizard, reconnect QR, network recovery |
-| Health and diagnostics | Basic implementation | Throttling, memory, buffer/encoder telemetry |
-| Self-test | CLI dependency check and automated tests | Browser-initiated full appliance self-test |
-| Multiple browsers | Shared state; last command wins | Explicit operator ownership |
-| Update/recovery | Installer preserves data and previous code | Release tooling and migration-aware rollback |
-| Safe shutdown | OS/SSH instructions | Narrow privileged helper and UI action |
-| Motor/LED/encoder integration | Not implemented | Hardware selection, wiring, measurement |
-| Calibration page | Not implemented | Test patterns, phase, scan direction, limits |
-| RGB, audio, live HDMI | Not implemented | After grayscale physical playback |
-
-There is no fake motor speed readout, simulated “sync lock,” or working-looking hardware control in the UI. The simulation label remains visible.
+| Standalone HDMI/V4L2 ingestion | Implemented | Confirm capture model, node, supported mode on Pi |
+| 32 × 25, 10 fps gray8 conversion | Implemented, shared with file conversion | Measure sustained performance and latency |
+| Fit / center crop | Implemented | Optical geometry calibration later |
+| Latest-frame preview and local status | Implemented | Inspect source pattern on actual capture |
+| Missing-device retry, EOF/stall blanking | Implemented | Unplug/replug and source-loss acceptance |
+| Boot service without web/AP dependency | Supplied | Install and reboot Pi with networking disconnected |
+| Upload studio and file library | Retained, separate manual tool | Existing regression tests |
+| Motor/LED/encoder integration | Not implemented | Confirm components, electrical design and output architecture |
+| Adafruit motor HAT | Listed existing part | Check winding-current strategy and measured speed capability |
+| Hardware watchdog/emergency stop | Not implemented | Design before powered assembly |
+| Calibration, RGB, audio | Pending | After grayscale optical output |
 
 ## Milestones
 
-1. **Local simulation:** validate authentication, uploads, real FFmpeg conversion, previews, controls, persistence and failure handling.
-2. **Pi software acceptance:** run installer on the actual Pi, reboot, test hotspot, run an extended loop, verify temperature/resource behavior, test interrupted work.
-3. **Hardware bring-up:** confirm component compatibility and wiring; test motor/index separately from LED; measure timing. Select a driver architecture based on evidence.
-4. **Static optical image:** bars/gradient, scan direction, phase, brightness and distortion calibration.
-5. **Physical grayscale video:** bounded buffering, measured synchronization, fault handling, realistic frame-rate/brightness limits.
-6. **Optional features:** richer calibration, RGB, HDMI capture, kiosk, automatic hotspot configuration and appliance packaging.
+1. **HDMI software preparation:** generated-source conversion, bounded reads, retry/blanking tests, service and configuration docs.
+2. **Actual Pi capture acceptance:** enumerate USB device; confirm advertised mode; inspect image; unplug/replug; reboot without network; measure 30-minute resource use and latency.
+3. **Hardware bring-up:** confirm motor, HAT, LED circuit and index sensor; power/current design; separately validate motor/index and LED. Keep physical output disabled until a measured design exists.
+4. **Static optical image:** synchronized controller and encoder feedback, phase/scan calibration, guarding and emergency stop.
+5. **Live optical grayscale:** latest-frame handoff to the synchronized output controller, independent safety watchdog, measured speed and latency.
+6. **Optional extensions:** calibration controls, RGB and richer local previews.
 
-## Decisions still open
+## Open decisions
 
-- Pi-only timing versus a dedicated controller.
-- Final motor driver and LED current-limiting circuit.
-- Exact disk geometry and physical safe operating range.
-- Hardware watchdog and loss-of-sync response.
-- Whether physical Pause holds an image while the disk spins.
-- Repository license, release policy, and distribution of any upstream assets.
-
-The first release's reduced service structure and absent setup wizard are intentional documented scope changes from the initial concept, not completed features. Future work should update this table and validation evidence together.
+- Exact HDMI capture model, Linux driver, format, size and rate.
+- Pi-only timing versus dedicated controller; no GPIO timing is implemented.
+- Motor drive strategy compatible with the supplied low-resistance stepper and Adafruit HAT.
+- LED current-regulation circuit and sensor voltage/interface.
+- Disk geometry, safe mechanical speed, watchdog and emergency stop.
+- Repository license and upstream asset distribution.

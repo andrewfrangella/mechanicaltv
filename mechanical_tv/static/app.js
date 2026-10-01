@@ -111,7 +111,7 @@ $('upload-form').addEventListener('submit', event => {
   $('upload-button').disabled=true; $('cancel-upload').hidden=false; $('upload-progress').hidden=false; $('upload-progress').value=0;
   xhr.upload.onprogress=event => { if(event.lengthComputable) { const percent=Math.round(event.loaded/event.total*100);$('upload-progress').value=percent;$('upload-status').textContent=percent < 100 ? `Uploading ${percent}%…` : 'Upload sent. Waiting for the Pi…'; } };
   xhr.onload=() => { try { const data=JSON.parse(xhr.responseText); if(xhr.status >= 400) throw new Error(data.error);$('upload-status').textContent='Upload complete. Preparation is queued; watch the library status below.';$('file').value='';refresh(); } catch(error) { notice(error.message);$('upload-status').textContent='Upload failed. Please try again.'; } };
-  xhr.onerror=() => { notice('Upload connection failed. Check Wi-Fi and try again.');$('upload-status').textContent='Upload failed.'; };
+  xhr.onerror=() => { notice('Upload connection failed. Check the connection and try again.');$('upload-status').textContent='Upload failed.'; };
   xhr.onabort=() => $('upload-status').textContent='Upload canceled. Any incomplete entry can be deleted after cleanup.';
   xhr.onloadend=() => { $('upload-button').disabled=false;$('cancel-upload').hidden=true; xhr=null; };
   xhr.send(file);

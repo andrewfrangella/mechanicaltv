@@ -17,6 +17,13 @@ MAX_DURATION = 600
 RESERVE_BYTES = 512 * 1024 * 1024
 
 
+def frame_filter(fit):
+    if fit not in ('fit', 'crop'):
+        raise ValueError('Framing must be fit or crop')
+    geometry = (f'scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2' if fit == 'fit' else f'scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT}')
+    return f'fps={FPS},{geometry},setsar=1,format=gray'
+
+
 class Library:
     def __init__(self, root):
         self.root = Path(root)
@@ -99,9 +106,8 @@ class Library:
                 raise ValueError("Maximum input dimensions are 1920 pixels on either side")
             if shutil.disk_usage(self.root).free < RESERVE_BYTES + 64 * 1024 * 1024:
                 raise ValueError("Not enough free space to prepare this video")
-            geometry = (f'scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2' if item['fit'] == 'fit' else f'scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT}')
             common = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-threads', '1', *input_flags, '-i', str(folder / 'original'), '-t', str(MAX_DURATION), '-map', '0:v:0', '-an', '-sn', '-dn', '-filter_threads', '1']
-            subprocess.run([*common, '-vf', f'fps={FPS},{geometry},setsar=1,format=gray', '-pix_fmt', 'gray', '-f', 'rawvideo', str(folder / 'frames.part')], capture_output=True, timeout=900, check=True)
+            subprocess.run([*common, '-vf', frame_filter(item['fit']), '-pix_fmt', 'gray', '-f', 'rawvideo', str(folder / 'frames.part')], capture_output=True, timeout=900, check=True)
             count, remainder = divmod((folder / 'frames.part').stat().st_size, FRAME_BYTES)
             if remainder or not 0 < count <= MAX_DURATION * FPS:
                 raise ValueError("Invalid prepared frame data")

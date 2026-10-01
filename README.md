@@ -1,47 +1,48 @@
 # Mechanical TV
 
-A local web studio for a Raspberry Pi mechanical television based on [bitluni's design](https://github.com/bitluni/MechanicalTV).
+An HDMI-first video converter for a Raspberry Pi 4 mechanical television based on [bitluni's design](https://github.com/bitluni/MechanicalTV).
 
-**Version 0.1.0 is a simulation release. It does not drive a motor, LED, encoder, or any GPIO.** It implements the media workflow before the physical output system is finalized. No Raspberry Pi or assembled-TV validation is claimed.
+**Hardware output is not implemented.** The software converts live capture to 32 × 25, 10 fps grayscale and publishes a local preview. It never drives a motor, LED, encoder, or GPIO. Pi and capture-device validation remain pending.
 
-![Player showing a generated source test pattern and its 32 by 25 grayscale preview](docs/images/player-desktop.png)
+## Primary operating flow
 
-## What works
-
-- Password-protected, locally hosted interface with no cloud services or external frontend assets.
-- Upload a video; retain the original and prepare 32 × 25, 10 fps, 8-bit grayscale frames.
-- Fit or center-crop framing; MP4/H.264 recommended. MP4/MOV, Matroska/WebM, and AVI containers are accepted when FFmpeg can decode them.
-- Browser-compatible silent source proxy alongside the prepared pixel preview.
-- Select, play, pause, seek, stop, loop, and adjust simulated brightness.
-- Persistent SQLite library, one-at-a-time conversion, upload cancellation, and interrupted-job recovery.
-- Basic health display, sanitized diagnostics download, and a command-line dependency check.
-- Raspberry Pi OS installer and hardened systemd unit for automatic startup.
-- Automated tests covering conversion, authentication, media streaming, playback, and recovery.
-
-## Start on a development computer
-
-Requires Python **3.11+**, FFmpeg and FFprobe with the `libx264` encoder. No third-party Python packages, npm installation, or frontend build is needed.
-
-```bash
-git clone https://github.com/andrewfrangella/mechanicaltv.git
-cd mechanicaltv
-python3 -m mechanical_tv.server init --data ./data
-python3 -m mechanical_tv.server serve --data ./data
+```text
+HDMI source → HDMI capture device → USB → Raspberry Pi 4
+            → FFmpeg → grayscale frames → preview sink
+                                      → future synchronized hardware output
 ```
 
-Open **http://127.0.0.1:8080** and sign in using the application password you just created. The password is separate from your Pi OS account. Initialization prompts privately and stores a salted scrypt hash.
+Power on, connect the HDMI source, and conversion runs automatically. No AP connection, browser, login, upload, or internet is required for normal operation. The Pi's own micro-HDMI ports are display outputs; the source connects to the separate capture device. The prepared software expects a Linux V4L2 capture device; confirm the exact model and supported modes before assembly.
 
-Create a five-second sample clip in another terminal:
+- Continuous conversion with fit or center crop and no recording/library requirement.
+- Bounded pipe reads and latest-frame preview; no accumulating frame archive.
+- Missing devices, disconnects, and stalls blank the preview and retry automatically.
+- SIGTERM/SIGINT stops FFmpeg and blanks the preview.
+- Explicit generated test source for development before hardware arrives.
+- Standalone systemd service with video-device access and no web listener.
+- Previous authenticated upload studio retained as a separately launched development tool.
+
+## Develop without hardware
+
+Requires Python 3.11+ and FFmpeg. No Python packages or frontend build are needed.
 
 ```bash
-bash packaging/make-test-clip.sh /tmp/mechanical-tv-test.mp4
+python3 -m mechanical_tv.capture --test-pattern --data ./data
 ```
 
-Upload it through **Library**, wait for **READY**, select it, then press **Play**. The server binds to localhost by default. To access a development server from your LAN, explicitly add `--host 0.0.0.0`.
+Inspect `data/capture/latest.pgm` with a PGM-capable image viewer and `data/capture/capture.json` for state. These files are atomically replaced; reopen the image to refresh. Stop with Ctrl-C. The preview goes black on exit. For a finite smoke run, add `--frames 10`.
+
+To capture on Linux after confirming the device modes:
+
+```bash
+python3 -m mechanical_tv.capture --device /dev/video0 --input-size 640x480 --input-fps 30 --data ./data
+```
+
+Use `--input-format mjpeg` only if your capture device advertises it. `--fit crop` fills the mechanical profile from the center; default `fit` preserves the whole source image.
 
 ## Install on Raspberry Pi OS
 
-Use Raspberry Pi OS 64-bit, Python 3.11 or later. Lite and Desktop are both supported by the design. The installer is intended for Pi OS/Debian; it has not yet been executed on a Pi.
+Use Pi OS 64-bit with Python 3.11+. Initial installation requires package access; runtime needs no network.
 
 ```bash
 sudo apt update
@@ -51,20 +52,18 @@ cd mechanicaltv
 sudo bash install.sh
 ```
 
-The installer asks for an application password, installs dependencies, and starts the service. Open `http://<Pi-IP-address>:8080`. If the hostname is `mechanical-tv` and your network supports mDNS, `http://mechanical-tv.local:8080` also works.
-
-**The installer does not change Wi-Fi, hostname, firewall, or GPIO settings.** Use the [installation guide](docs/INSTALL.md) for networking and the optional standalone hotspot. Initial installation requires internet; normal operation does not.
+The installer enables standalone capture at boot. It does not prompt for a web password, create an AP, or enable GPIO/I2C. An existing installation's media, credentials, and environment file are preserved; its primary service switches from the web studio to capture. See [installation](docs/INSTALL.md) for device selection, permissions, migration, and maintenance.
 
 ## Documentation
 
 | Document | Contents |
 | --- | --- |
-| [Installation](docs/INSTALL.md) | Fresh Pi OS, setup, hotspot, updates, recovery, shutdown |
-| [User guide](docs/USER_GUIDE.md) | Screens, uploads, playback behavior, limits, troubleshooting |
-| [Architecture](docs/ARCHITECTURE.md) | Components, API, storage, processing, security boundaries |
-| [Project plan](docs/PROJECT_PLAN.md) | Full intended flow and implemented/pending feature matrix |
-| [Hardware notes](docs/HARDWARE.md) | Supplied parts, compatibility questions, future output boundary |
-| [Validation](docs/VALIDATION.md) | Test commands, evidence, manual Pi acceptance checklist |
+| [Installation](docs/INSTALL.md) | Capture device discovery, offline operation, service setup, recovery |
+| [Architecture](docs/ARCHITECTURE.md) | Live pipeline, sink boundary, retained studio API |
+| [Hardware](docs/HARDWARE.md) | Supplied parts and preparation for Pi 4 / Adafruit HAT |
+| [Project plan](docs/PROJECT_PLAN.md) | HDMI-first milestones and pending hardware |
+| [Validation](docs/VALIDATION.md) | Automated checks and actual-Pi acceptance |
+| [Studio user guide](docs/USER_GUIDE.md) | Optional upload studio workflow |
 
 ## Tests
 
@@ -72,22 +71,26 @@ The installer asks for an application password, installs dependencies, and start
 python3 -m unittest discover -s tests -v
 bash -n install.sh packaging/make-test-clip.sh
 node --check mechanical_tv/static/app.js
+git diff --check
 ```
 
-The tests start a local HTTP server and generate their own short video. They do not touch GPIO or the real media library. Node is optional and used only for JavaScript syntax validation. GitHub Actions runs these checks on push and pull request.
+Tests cover capture framing, pipe fragmentation/EOF, stall/stop handling, retry blanking, and real generated-source conversion, alongside the retained studio tests. They never touch GPIO or a real capture device. FFmpeg-dependent checks skip when FFmpeg is absent.
 
-## Deliberate limits
+## Optional upload studio
 
-- One managed service with a background worker and FFmpeg child processes. The earlier three-service architecture is a future option, not this release's deployment.
-- Maximum upload 256 MiB; maximum duration 10 minutes; maximum width and height 1920 pixels each. A 512 MiB disk reserve plus preparation headroom is enforced.
-- Conversion shows queued/preparing/ready/failed states, not a precise preparation percentage. Upload progress is measured.
-- Fixed profile: 32 × 25 at 10 fps. No hardware timing guarantees, RGB, HDMI capture, audio, calibration, or motor controls.
-- No automatic network wizard, browser shutdown, operator-control lease, automatic updater, or resumable uploads yet.
-- Signed-in browsers share one player; latest command wins. Closing a browser does not stop playback. Restarting the service returns to idle.
-- HTTP is intended for a trusted local network/hotspot only. Do not port-forward this server to the internet. HTTPS and hardened public hosting are outside this release.
+For file-based development, launch separately:
+
+```bash
+python3 -m mechanical_tv.server init --data ./data
+python3 -m mechanical_tv.server serve --data ./data
+```
+
+Open `http://127.0.0.1:8080`. This is an independent simulated player and library; it does not control the HDMI service. FFprobe and the FFmpeg `libx264` encoder are needed for uploads. LAN exposure requires an explicit `--host`; an AP is never required.
+
+## Limits
+
+Capture compatibility, latency, and sustained performance have not been measured on the Pi. Receiving frames does not prove that HDMI signal is present: some capture devices generate their own no-signal frames. The stall watchdog detects absence of decoded frames only. The preview sink is not a physical timing engine, and requested 10 fps is not measured disk speed. Audio, RGB, physical calibration, motor controls, and synchronization remain pending.
 
 ## Attribution and licensing
 
-Mechanical concept and reference: [bitluni/MechanicalTV](https://github.com/bitluni/MechanicalTV), including its ESP32-S3 firmware and models. This repository contains independently written Pi application code; it does not include bitluni's firmware, STL files, or sample video content. Review upstream permissions before redistributing upstream assets.
-
-No software license has been selected for this repository yet. The repository owner should choose one before inviting reuse or distributing licensed releases. Being visible on GitHub is not itself an open-source license.
+Mechanical concept: [bitluni/MechanicalTV](https://github.com/bitluni/MechanicalTV). This repository contains independently written Pi software, without upstream firmware, models, or sample content. Review upstream permissions before redistributing those assets. No software license has been selected for this repository yet.

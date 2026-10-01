@@ -1,6 +1,6 @@
 # Hardware record — integration pending
 
-This file records the owner's supplied parts and the discussion so far. It is **not a verified wiring diagram or authorization to energize the assembly**. Hardware decisions were deferred while building the upload interface.
+This file records the owner's supplied parts and the discussion so far. It is **not a verified wiring diagram or authorization to energize the assembly**. The primary software path is now standalone HDMI capture; motor and optical output remain pending.
 
 | Item | Owner-supplied description |
 | --- | --- |
@@ -13,7 +13,7 @@ This file records the owner's supplied parts and the discussion so far. It is **
 | Light sources | 3 W white LEDs; 3 W RGB LEDs for a later stage |
 | Feedback | Photoelectric index sensor; exact model pending |
 | Other | Switches, potentiometers, wire, solder, black PLA, printer supplies |
-| Future source | HDMI capture device; exact model pending |
+| Primary source | Owner has an HDMI capture/input device; exact model and USB/V4L2 support pending |
 
 ## Findings to carry into integration
 
@@ -34,3 +34,13 @@ The [reference firmware](https://github.com/bitluni/MechanicalTV/blob/main/Mecha
 Confirm exact motor, LED, sensor, driver and supply models; obtain a complete circuit; decide output architecture; verify logic levels and power distribution; establish mechanical mounting, balance and guarding; measure encoder timing and LED modulation. The current software never accesses GPIO and must not be presented as proof of hardware compatibility.
 
 References: [project repository](https://github.com/bitluni/MechanicalTV), [printed models](https://github.com/bitluni/MechanicalTV/tree/main/Models), [owner's video reference](https://www.youtube.com/watch?v=R-wbfP1pmVw&t=375s). Video-only details were not independently verified during this build.
+
+## HDMI-first connection preparation
+
+Prepare the signal chain as **source HDMI OUT → capture HDMI IN → capture USB → Pi 4 USB**. The Pi 4 micro-HDMI ports are outputs, not capture inputs ([Pi documentation](https://projects.raspberrypi.org/en/projects/raspberry-pi-getting-started/8)). Confirm whether the supplied input device is actually USB/UVC/V4L2; an HDMI adapter or other capture interface cannot be assumed to work with this path. Record its label/model, USB ID, video node and advertised capture modes before configuring it.
+
+Software can be tested with `python3 -m mechanical_tv.capture --test-pattern` before assembly. Leave the motor supply, HAT motor outputs, LED circuit, and sensor disconnected during capture-only acceptance. No physical pin assignments have been selected and no I2C/GPIO access is enabled by the service.
+
+For later HAT bring-up, document board revision/address, Pi header mounting/clearance, winding pairs, supply setting, and the current-management strategy first. Adafruit specifies 5–12 V motor power and recommends separate Pi/motor supplies ([power guide](https://learn.adafruit.com/adafruit-dc-and-stepper-motor-hat-for-raspberry-pi/powering-motors)). This does not establish compatibility with the listed 1 A/phase, low-resistance stepper. Do not energize it from the adjustable supply merely because its setting falls inside the HAT range. Retain the HAT as an available part until current and timing feasibility are measured.
+
+Record sensor output voltage/type before any GPIO connection; the Pi interface needs a verified level-compatible circuit. Complete LED current regulation and thermal mounting before modulation tests. The future controller must consume latest grayscale frames independently of source timing and disk encoder timing. HDMI frame arrival is not an index pulse or speed feedback.

@@ -1,5 +1,30 @@
 # Architecture and developer notes
 
+## Primary runtime: standalone HDMI
+
+```mermaid
+flowchart LR
+  Source[HDMI source] --> Capture[USB capture device]
+  Capture -->|V4L2| FFmpeg[FFmpeg capture and conversion]
+  FFmpeg -->|800 byte gray8 frames| Reader[Bounded frame reader]
+  Reader --> Sink[PreviewSink: latest PGM and status]
+  Reader -. future adapter .-> Output[Encoder synchronized motor and LED controller]
+```
+
+`mechanical_tv.capture` is the default systemd entry point. It uses no HTTP server, authentication, library, database, AP, or network dependency. The existing studio is an optional independent developer tool.
+
+FFmpeg opens the configured V4L2 node, negotiates the selected input mode, drops audio, and normalizes to the shared `core.frame_filter`: 10 fps, fit/pad or center crop, 32 × 25, gray8 row-major. The Python reader assembles exactly 800 bytes per frame, handling fragmented pipe reads. It uses a five-second complete-frame deadline and checks shutdown at least every 200 ms while waiting. FFmpeg buffers and capture latency still need measurement on Pi; this is not a hard real-time pipeline.
+
+`PreviewSink.frame(bytes)` is the future output boundary. Today it atomically replaces `latest.pgm` and `capture.json` under `$MTV_DATA/capture/`; it stores no frame history. Status includes received count, update timestamp, profile, and `hardware_enabled: false`. Files are individually atomic, not a transactional pair. Consumers should check status freshness; power loss or SIGKILL cannot run shutdown blanking.
+
+On missing device, FFmpeg EOF, or frame stall, the sink blanks, reports `waiting`, closes/kills the child as necessary, and retries after two seconds. SIGTERM/SIGINT blanks and reports `stopped`. FFmpeg stderr goes directly to the journal rather than an undrained memory buffer. Generated video requires explicit `--test-pattern`; source loss never switches to an uploaded clip or test image.
+
+`receiving` records decoded frame arrival, not HDMI signal lock or measured optical synchronization. Device-generated no-signal images can look like valid capture frames. The future physical adapter needs an independent encoder clock, blanking on loss of sync, output watchdog, and emergency stop. It must not perform motor/LED timing through synchronous file writes in this preview loop.
+
+The service uses an unprivileged account plus the `video` group. `PrivateDevices=false` exposes the host namespace for V4L2, with `DevicePolicy=closed` and `DeviceAllow=char-video4linux rw`. No GPIO/I2C devices are allowed. There is no installed web listener. Capture-device mode and performance remain unvalidated on actual hardware.
+
+# Retained upload studio internals
+
 ## Runtime
 
 ```mermaid
@@ -12,7 +37,7 @@ flowchart LR
   Player --> Frames[Prepared grayscale frames]
 ```
 
-Version 0.1.0 has one systemd service. Web requests are handled in threads, a worker thread schedules one conversion at a time, and FFmpeg does CPU-heavy conversion in separate processes. A thread lock protects playback state, each short database operation has a separate closed connection/transaction, and the browser polls the authoritative player.
+The optional studio is launched separately from the HDMI service. Web requests are handled in threads, a worker thread schedules one conversion at a time, and FFmpeg does CPU-heavy conversion in separate processes. A thread lock protects playback state, each short database operation has a separate closed connection/transaction, and the browser polls the authoritative player.
 
 This is a deliberate reduction from the initial three-service concept. It makes the first Pi installation smaller, but a whole-process failure also interrupts the player. Splitting the real output controller into a separate supervised process remains an appropriate next step when hardware work begins.
 
@@ -69,11 +94,11 @@ All `/api/*` routes except login require a session. POST requests require `X-MTV
 | GET `/api/health` | Dependencies, worker, storage, uptime, mode |
 | GET `/api/diagnostics` | Downloadable sanitized health JSON |
 
-Sessions last 12 hours and are invalidated by restart. Login attempts are globally limited to ten per minute and concurrent sessions to 32. The server binds to loopback in development and all interfaces in the provided appliance configuration.
+Sessions last 12 hours and are invalidated by restart. Login attempts are globally limited to ten per minute and concurrent sessions to 32. The server binds to loopback in development and loopback by default.
 
 ## Boundaries
 
-- Trusted LAN/hotspot deployment only. HTTP has no transport encryption. Do not reuse a valuable account password here, expose the service publicly, or assume session cookies secure it against network observers.
+- Trusted LAN deployment only. HTTP has no transport encryption. Do not reuse a valuable account password here, expose the service publicly, or assume session cookies secure it against network observers.
 - No privileged web actions. The service user cannot reconfigure Wi-Fi, install packages, shut down the OS, or access GPIO devices through the supplied systemd unit.
 - Static assets are local; restrictive CSP, no third-party scripts, no analytics, no CORS.
 - Fixed asset routes and validated UUID media paths; names render through `textContent`.

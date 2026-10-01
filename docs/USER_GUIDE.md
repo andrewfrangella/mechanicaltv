@@ -1,9 +1,11 @@
+> This guide covers the optional upload studio, launched manually with `python3 -m mechanical_tv.server serve`. The default boot service now captures HDMI without a browser or AP; see [INSTALL.md](INSTALL.md). Studio playback does not control HDMI capture or hardware.
+
 # User guide
 
 ## Everyday flow
 
 1. Power on the Pi and allow it to boot.
-2. Join the same network, or the Pi's configured hotspot.
+2. Join the same network, or the Pi's configured local network.
 3. Open the app's local address and sign in.
 4. Open Library, choose a clip and framing, then Upload & prepare.
 5. Wait for READY. Select the video.
@@ -26,7 +28,7 @@ The source panel shows a silent H.264 proxy, scaled for efficient browser playba
 | Loop | Repeats at the end; when off, the player stops and blanks |
 | Brightness | Scales simulated brightness from 0–100%; does not change an LED |
 
-Closing the tab, signing out, or disconnecting Wi-Fi does not stop playback. Reconnecting reads the current server timeline. Restarting the service or Pi always returns to idle with no selection. All signed-in clients can control the same player; an operator lease is planned but not yet implemented.
+Closing the tab, signing out, or disconnecting Wi-Fi does not stop playback. Reconnecting reads the current server timeline. Restarting the studio or Pi always returns to idle with no selection. All signed-in clients can control the same player; an operator lease is planned but not yet implemented.
 
 In a future physical display, freezing an image may require continuing disk rotation. No physical pause/stop behavior is implemented here.
 
@@ -57,16 +59,16 @@ Download diagnostics returns these basic values as JSON. It does not include pas
 
 | Symptom | Check |
 | --- | --- |
-| Site unreachable | Confirm Wi-Fi/network, IP, port 8080, and service status over SSH |
+| Site unreachable | Confirm Wi-Fi/network, IP, port 8080, and the manually launched studio process |
 | `.local` name fails | Use the Pi's IP address; mDNS varies by network/client |
-| Hotspot says “No internet” | Expected for an offline hotspot; open the numeric local address |
-| Login rejected | Use the application password, not Wi-Fi/OS credentials; reset using INSTALL.md |
+| Hotspot says “No internet” | Expected for an offline local network; open the numeric local address |
+| Login rejected | Use the application password, not Wi-Fi/OS credentials; reset with `python3 -m mechanical_tv.server reset-password --data ./data` and restart the studio |
 | Too many login attempts | Wait one minute; rate limit is shared across clients |
 | Preparation remains queued | Stop playback; wait for the preceding conversion |
-| Preparation failed | Try a short MP4/H.264 clip within limits; inspect service logs |
+| Preparation failed | Try a short MP4/H.264 clip within limits; inspect the studio terminal output |
 | Upload rejected for space | Remove unwanted media; leave room for original, proxy, frames, and reserve |
 | Page loses connection | Pi may still be playing. Reconnect; do not assume the display stopped |
 | Source preview does not play | Try a browser with H.264 support; prepared TV preview is separate |
 | Picture looks too small | Try Crop on a new upload; low resolution is intentional |
 
-Calibration, gamma, crop-position adjustment, HDMI input, RGB, and hardware control are roadmap features, not hidden settings.
+HDMI capture runs in a separate service. Calibration, gamma, crop-position adjustment, RGB and hardware control are roadmap features, not hidden settings.
