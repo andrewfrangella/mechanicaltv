@@ -695,14 +695,17 @@ class MotorController:
         cur_fps = 0.5  # gentle soft start
         self.current_fps = cur_fps
         last = time.monotonic()
+        spr = self.driver.steps_per_rev
+        applied = 0.0  # step rate actually sent to the driver
 
-        def apply(fps: float) -> None:
+        def desired_rate(fps: float) -> float:
             # trim is microseconds added to each revolution (same meaning as the step loop)
             rev_period = max(1e-3, 1.0 / fps + self._trim_us * 1e-6)
-            self.driver.set_rate(self.driver.steps_per_rev / rev_period)
+            return spr / rev_period
 
         try:
-            apply(cur_fps)
+            applied = desired_rate(cur_fps)
+            self.driver.set_rate(applied)
             while not self._stop_event.wait(0.02):
                 now = time.monotonic()
                 dt = now - last
@@ -714,7 +717,13 @@ class MotorController:
                 elif cur_fps > target:
                     cur_fps = max(target, cur_fps - ramp_step)
                 self.current_fps = cur_fps
-                apply(cur_fps)
+                # Slew-limit the final rate: speed ramp + sync trim together may change speed at
+                # most 2x the ramp rate, so a sudden trim (e.g. from a missed index pulse) can't
+                # jerk the motor and make it lose sync.
+                max_change = 2.0 * self.ramp_rate_fps * spr * dt
+                want = desired_rate(cur_fps)
+                applied += max(-max_change, min(max_change, want - applied))
+                self.driver.set_rate(applied)
         finally:
             self.driver.set_rate(0)
 
