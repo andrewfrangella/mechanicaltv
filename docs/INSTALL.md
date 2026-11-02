@@ -10,7 +10,11 @@ cd mechanicaltv
 sudo bash install.sh
 ```
 
-The installer installs Python, FFmpeg, v4l-utils and I2C tools, enables I2C, creates the unprivileged `mechanical-tv` service account (groups `i2c`, `gpio`, `video`), asks for the web application password on first install, copies a versioned release to `/opt/mechanical-tv/releases/` (symlinked from `/opt/mechanical-tv/current`), writes `/etc/mechanical-tv/environment` if it does not exist, enables `mechanical-tv.service`, and checks `/healthz`. It prints a notice if the HDMI-to-CSI kernel overlay is missing from the boot configuration; it never edits that file itself.
+The installer installs Python, FFmpeg, v4l-utils, lgpio and I2C tools, enables I2C, creates the unprivileged `mechanical-tv` service account (groups `i2c`, `gpio`, `video`), asks for the web application password on first install, copies a versioned release to `/opt/mechanical-tv/releases/` (symlinked from `/opt/mechanical-tv/current`), writes `/etc/mechanical-tv/environment` if it does not exist, writes the systemd drop-in `/etc/systemd/system/mechanical-tv.service.d/10-hardware.conf` for the motor driver, enables `mechanical-tv.service`, and checks `/healthz`. It prints a notice if the HDMI-to-CSI kernel overlay is missing from the boot configuration; that overlay is never added automatically, because the adapter cannot be detected before the overlay is loaded.
+
+## Motor driver
+
+`install.sh` defaults to an A4988-style STEP/DIR driver (A4988, DRV8825, TMC2209) clocked by the Pi's hardware PWM: STEP on GPIO 18, DIR on GPIO 23, ENABLE on GPIO 24, 16 microsteps. `MTV_DIR_GPIO`, `MTV_ENABLE_GPIO`, `MTV_MICROSTEPS` and `MTV_MOTOR_DIRECTION` in the environment file override these. On the first install it appends `dtparam=audio=off`, `dtoverlay=pwm,pin=18,func=2` and `gpio=24=op,dh` to the boot configuration (backup next to it as `config.txt.mechanical-tv.bak`), stops without starting the service, and asks for a reboot; the service starts automatically afterwards. Run `sudo MTV_MOTOR_DRIVER=hat bash install.sh` for the Adafruit DC & Stepper Motor HAT wiring described in [HARDWARE.md](HARDWARE.md); no boot settings are added in that case.
 
 Open `http://<pi-hostname>.local:8080` or `http://<pi-ip>:8080` and sign in with the application password.
 
