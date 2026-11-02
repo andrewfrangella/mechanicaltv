@@ -14,6 +14,8 @@ from .motor import MotorController, create_motor_driver
 from .sensor import BaseOptoSensor, create_opto_sensor, MockOptoSensor
 from .led import BaseLEDModulator, create_led_modulator
 
+MAX_FPS = 24.0  # speed ceiling: 1440 RPM; above ~20 FPS the stepper may stall and the LED pixel slot drops below 55 us
+
 
 class RealtimeController:
     """Master controller orchestrating video capture, motor rotation,
@@ -52,6 +54,14 @@ class RealtimeController:
         self._running = False
         self._last_rev_time = 0.0
         self._error_msg = ""
+
+        # Free-run: an internal clock at target_fps drives the LED and preview instead of the
+        # index sensor, for bench tests with no disk (or no sensor) fitted. The watchdog is fed
+        # by that clock, so the LED stays on without a spinning disk: see set_free_run().
+        self.free_run = False
+        self._free_run_thread: Optional[threading.Thread] = None
+        self._free_run_stop = threading.Event()
+        self.free_run_frames = 0
 
         # Closed-loop PLL parameters
         self._kp = 0.05  # Proportional gain for motor step trim
@@ -94,16 +104,63 @@ class RealtimeController:
         self._sync_thread = None
 
     def emergency_blank(self) -> None:
-        """Immediately cut power to LED and stop motor."""
+        """Immediately cut power to LED and stop motor. Also leaves free-run, which would relight the LED."""
         with self._lock:
             self.led.blank()
+        self.set_free_run(False)
         self.stop()
         with self._lock:
+            self.led.blank()
             self.state = "idle"
+
+    # -- free-run output clock ----------------------------------------------
+
+    def set_free_run(self, enabled: bool) -> None:
+        """Drive the LED and preview from an internal clock at target_fps, ignoring the index sensor.
+
+        While enabled the LED fires whether or not the disk spins or is even fitted: the operator
+        is choosing to bypass the stall interlock, for bench checks of the video path. Index
+        pulses still trim the motor speed; they no longer clock frames. Disabling blanks the LED
+        and hands output back to the sensor, which relights it on the next index pulse.
+        """
+        enabled = bool(enabled)
+        with self._lock:
+            if enabled == self.free_run:
+                return
+            self.free_run = enabled
+            if enabled:
+                self._free_run_stop.clear()
+                self._free_run_thread = threading.Thread(
+                    target=self._free_run_loop, daemon=True, name="realtime-free-run"
+                )
+                self._free_run_thread.start()
+                return
+            self._free_run_stop.set()
+            thread, self._free_run_thread = self._free_run_thread, None
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1.5)
+        with self._lock:
+            self.led.blank()
+
+    def _free_run_loop(self) -> None:
+        stop = self._free_run_stop
+        t_next = time.perf_counter()
+        while not stop.is_set():
+            period = 1.0 / max(1.0, self.target_fps)
+            self.led.feed_watchdog()
+            self._drive_frame(time.perf_counter(), period)
+            with self._lock:
+                self.free_run_frames += 1
+            t_next += period
+            delay = t_next - time.perf_counter()
+            if delay <= 0:
+                t_next = time.perf_counter()  # fell behind (busy CPU): resume from now, never burst
+                continue
+            stop.wait(delay)
 
     def set_target_fps(self, fps: float) -> None:
         with self._lock:
-            self.target_fps = max(1.0, min(20.0, float(fps)))
+            self.target_fps = max(1.0, min(MAX_FPS, float(fps)))
             self.motor.set_target_fps(self.target_fps)
             self.sensor.set_target_fps(self.target_fps)
 
@@ -138,10 +195,7 @@ class RealtimeController:
         if not self._running:
             return
 
-        # 1. Feed LED watchdog
-        self.led.feed_watchdog()
-
-        # 2. Closed loop PLL speed trim:
+        # Closed loop PLL speed trim:
         # Only trim when motor is near operating speed (>= 80%) to avoid winding up during acceleration ramp
         if self.motor.current_fps >= self.target_fps * 0.8:
             target_period = 1.0 / self.target_fps
@@ -151,14 +205,22 @@ class RealtimeController:
         else:
             self.motor.apply_trim_us(0.0)
 
-        # 3. Fetch latest video frame and serialize for Nipkow disk
+        if self.free_run:
+            return  # the free-run clock owns the LED, watchdog and preview
+
+        self.led.feed_watchdog()
+        self._drive_frame(timestamp, period)
+
+    def _drive_frame(self, timestamp: float, period: float) -> None:
+        """Serialize the newest frame for the disk, pulse the LED across `period`, store the preview."""
+        # 1. Fetch latest video frame and serialize for Nipkow disk
         frame = self.pipeline.get_latest_frame()
         nipkow_stream = self.pipeline.serialize_nipkow_stream(frame)
 
-        # 4. Output modulated pulses to LED
+        # 2. Output modulated pulses to LED
         self.led.output_frame(nipkow_stream, period)
 
-        # 5. Store preview frame for UI
+        # 3. Store preview frame for UI
         with self._lock:
             self.frame_counter += 1
             self.current_preview_frame = frame
@@ -204,6 +266,9 @@ class RealtimeController:
                 "sync_locked": sensor_telem.get("sync_locked", False),
                 "jitter_ms": sensor_telem.get("jitter_ms", 0.0),
                 "frame_counter": self.frame_counter,
+                "free_run": self.free_run,
+                "free_run_frames": self.free_run_frames,
+                "output_clock": "free-run" if self.free_run else "index-sensor",
                 "error": self._error_msg,
                 "motor": motor_telem,
                 "sensor": sensor_telem,
@@ -218,6 +283,7 @@ class RealtimeController:
             return self.pipeline.get_latest_frame()
 
     def close(self) -> None:
+        self.set_free_run(False)
         self.stop()
         self.led.close()
         self.pipeline.close()

@@ -92,6 +92,11 @@ $('rt-speed').addEventListener('change', () => {
   rtControl('speed', { fps: Number($('rt-speed').value) });
 });
 
+// Free-run output: internal clock drives the LED and preview instead of the index sensor.
+$('rt-free-run').addEventListener('change', () => {
+  rtControl('free_run', { enabled: $('rt-free-run').checked });
+});
+
 // Brightness Control
 $('rt-bright').addEventListener('input', () => {
   $('rt-bright-val').textContent = `${$('rt-bright').value}%`;
@@ -300,7 +305,8 @@ function showSourceStatus(pipe) {
     let text;
     if (d.signal) {
       const fps = d.input_fps ? ` @ ${Number(d.input_fps).toFixed(0)} FPS` : '';
-      text = `${where} · ${d.input_resolution || '?'}${fps} · LIVE`;
+      const picture = d.picture ? 'LIVE' : `LIVE · BLACK PICTURE (peak ${d.frame_peak || 0}/255)`;
+      text = `${where} · ${d.input_resolution || '?'}${fps} · ${picture}`;
     } else if (d.connected) {
       text = `${where} · WAITING FOR FRAMES`;
     } else {
@@ -308,8 +314,10 @@ function showSourceStatus(pipe) {
     }
     $('source-status-text').textContent = text;
     $('source-format-label').textContent = d.signal ? `HDMI LIVE · ${(d.input_format || '').toUpperCase()}` : 'HDMI · NO SIGNAL';
-    empty.hidden = Boolean(d.signal);
-    if (!d.signal) {
+    empty.hidden = Boolean(d.signal && d.picture);
+    if (d.signal && !d.picture) {
+      empty.textContent = 'Signal locked and frames are arriving, but every pixel is black. The device on the HDMI cable is sending a black picture: wake it, un-blank its second display, or put a window on that display.';
+    } else if (!d.signal) {
       empty.textContent = d.error || (d.connected
         ? 'Source detected and timings locked; waiting for the first frame from FFmpeg. If this persists, read journalctl -u mechanical-tv for "ffmpeg exited" lines.'
         : 'Waiting for an HDMI source. The source must show a second display.');
@@ -341,8 +349,15 @@ async function refresh() {
     $('motor-pill').className = `pill ${motorState}`;
 
     const isLocked = rt ? rt.sync_locked : false;
-    $('sync-pill').textContent = `SYNC: ${isLocked ? 'LOCKED' : 'UNLOCKED'}`;
-    $('sync-pill').className = `pill ${isLocked ? 'locked' : (motorState === 'idle' ? 'idle' : 'ramping')}`;
+    const freeRun = Boolean(rt && rt.free_run);
+    if (freeRun) {
+      $('sync-pill').textContent = 'SYNC: FREE-RUN';
+      $('sync-pill').className = 'pill free-run';
+    } else {
+      $('sync-pill').textContent = `SYNC: ${isLocked ? 'LOCKED' : 'UNLOCKED'}`;
+      $('sync-pill').className = `pill ${isLocked ? 'locked' : (motorState === 'idle' ? 'idle' : 'ramping')}`;
+    }
+    if (document.activeElement !== $('rt-free-run')) $('rt-free-run').checked = freeRun;
 
     // Update Player & Timeline state
     if (p) {
@@ -371,13 +386,13 @@ async function refresh() {
     if (rt) {
       $('telem-target-rpm').textContent = `${Math.round(rt.target_rpm)} RPM (${rt.target_fps} FPS)`;
       $('telem-measured-rpm').textContent = `${rt.measured_rpm.toFixed(1)} RPM`;
-      $('telem-lock').textContent = isLocked ? 'LOCKED (±0.4%)' : (motorState === 'idle' ? 'STANDBY' : 'ACQUIRING');
+      $('telem-lock').textContent = freeRun ? 'FREE-RUN CLOCK' : isLocked ? 'LOCKED (±0.4%)' : (motorState === 'idle' ? 'STANDBY' : 'ACQUIRING');
       $('telem-jitter').textContent = `${rt.jitter_ms.toFixed(2)} ms`;
 
       const dutyPct = rt.led && rt.led.average_duty_cycle ? (rt.led.average_duty_cycle * 100).toFixed(1) : '0.0';
       $('telem-duty').textContent = `${dutyPct}%`;
 
-      const watchdogStatus = rt.led && rt.led.safety_tripped ? 'TRIPPED (OFF)' : (motorState === 'idle' ? 'ARMED' : 'ACTIVE');
+      const watchdogStatus = rt.led && rt.led.safety_tripped ? 'TRIPPED (OFF)' : freeRun ? 'BYPASSED (FREE-RUN)' : (motorState === 'idle' ? 'ARMED' : 'ACTIVE');
       $('telem-watchdog').textContent = watchdogStatus;
 
       // Sync calibration controls if not focused

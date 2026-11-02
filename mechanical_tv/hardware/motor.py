@@ -20,6 +20,8 @@ import threading
 import time
 from typing import Dict, List, Optional
 
+MAX_FPS = 24.0  # speed ceiling: 1440 RPM; above ~20 FPS the stepper may stall and the LED pixel slot drops below 55 us
+
 
 # PCA9685 Registers
 PCA9685_ADDRESS = 0x60
@@ -679,7 +681,7 @@ class MotorController:
 
     def set_target_fps(self, fps: float) -> None:
         with self._lock:
-            self.target_fps = max(1.0, min(20.0, float(fps)))
+            self.target_fps = max(1.0, min(MAX_FPS, float(fps)))
 
     def apply_trim_us(self, trim_us: float) -> None:
         """Apply closed-loop timing adjustment (in microseconds per revolution) from index sensor PLL."""

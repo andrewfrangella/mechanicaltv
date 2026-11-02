@@ -131,7 +131,7 @@
           </div>
           <div class="inline">
             <label for="rt-speed">Speed:</label>
-            <input type="range" id="rt-speed" min="1.0" max="15.0" step="0.1" value="10.0">
+            <input type="range" id="rt-speed" min="1.0" max="24.0" step="0.1" value="10.0">
             <output id="rt-speed-val">10.0 FPS (600 RPM)</output>
           </div>
           <div class="inline">
@@ -139,6 +139,11 @@
             <input type="range" id="rt-bright" min="0" max="100" value="70">
             <output id="rt-bright-val">70%</output>
           </div>
+        </div>
+        <div class="control-row">
+          <label class="inline" for="rt-free-run" title="Clock the LED and preview from an internal timer at the target speed instead of the disk's index sensor. The LED fires without a spinning disk: bench tests only.">
+            <input type="checkbox" id="rt-free-run"> Free-run output (ignore disk sync; LED fires without a spinning disk)
+          </label>
         </div>
       </section>
 

@@ -4,6 +4,8 @@
 
 ## Everyday flow
 
+With the local console (default install) the window opens full screen when the Pi's desktop starts; see [LOCAL_APP.md](LOCAL_APP.md) for its layout, keys, the free-run output and the debug log. The controls below have the same names in both interfaces. With the web interface:
+
 1. Power on the Pi and allow it to boot.
 2. Join the same network as the Pi.
 3. Open the app's local address and sign in.
@@ -16,7 +18,13 @@ Everything stays on the Pi. After an upload finishes, the laptop is no longer th
 
 ## Live HDMI input
 
-Select **Live HDMI Video (capture adapter)** in the Video Input selector on the Realtime tab. The selection is not remembered across a service restart or reboot (the input returns to the SMPTE pattern) unless the operator sets `MTV_DEFAULT_SOURCE=hdmi`; see INSTALL.md. The status line next to the selector (below it on narrow screens) reports the adapter type (CSI or USB), the input resolution and frame rate while frames flow as `LIVE`; `WAITING FOR FRAMES` while the device is open but no frame has arrived in the last 5 s; or `NO SIGNAL`, with the reason in the Source Video panel (device missing, no HDMI source detected, FFmpeg exit message). The Source Video panel shows the same 32 × 25 frame that is sent to the disk; there is no full-resolution browser preview of live HDMI. When frames stop, the last frame is held for at most 5 s and then the disk shows black, never a test pattern, while the service reopens the device every second. The selector follows the server, so a reload or another browser shows the active input.
+Select **Live HDMI Video (capture adapter)** in the Video Input selector on the Realtime tab. The selection is not remembered across a service restart or reboot (the input returns to the SMPTE pattern) unless the operator sets `MTV_DEFAULT_SOURCE=hdmi`; see INSTALL.md. The status line next to the selector (below it on narrow screens) reports the adapter type (CSI or USB), the input resolution and frame rate while frames flow as `LIVE`, or as `BLACK PICTURE (peak n/255)` when frames arrive but every pixel is black (the source is sending a blank second display: wake it or move a window onto that display); `WAITING FOR FRAMES` while the device is open but no frame has arrived in the last 5 s; or `NO SIGNAL`, with the reason in the Source Video panel (device missing, no HDMI source detected, FFmpeg exit message). The Source Video panel shows the same 32 × 25 frame that is sent to the disk; there is no full-resolution browser preview of live HDMI. When frames stop, the last frame is held for at most 5 s and then the disk shows black, never a test pattern, while the service reopens the device every second. The selector follows the server, so a reload or another browser shows the active input.
+
+## Motor, speed and free-run output
+
+**Spin Up Motor** ramps the disk to the target speed; **Stop Motor** releases it; **Emergency Blank** cuts the LED, stops the motor and turns free-run off. Speed runs from 1 to 24 FPS (60 to 1440 RPM). Above about 20 FPS a NEMA 17 may stall on a printed disk and each LED pixel slot shrinks below 55 µs; the ceiling is there to try, not a guarantee.
+
+**Free-run output** clocks the LED and preview from an internal timer at the target speed instead of the disk's index pulse. The LED fires without a spinning disk and the stall interlock is bypassed, so use it only for bench tests of the video path and never with a stopped disk under the LED. The sync pill reads `FREE-RUN` while it is on.
 
 ## Player
 
@@ -77,6 +85,9 @@ Download diagnostics returns these basic values as JSON. It does not include pas
 | HDMI status says no HDMI signal on the CSI bridge | The source must show a second display named MechanicalTV. Check the ribbon is in CAMERA, the overlay is loaded, the EDID line appeared in the journal, and follow "If the Mac shows no display" in INSTALL.md (`v4l2-ctl --log-status`) |
 | HDMI status stays at WAITING FOR FRAMES | Timings locked but FFmpeg delivers nothing; read `journalctl -u mechanical-tv -f` for `ffmpeg exited` lines and check `MTV_HDMI_FORMAT` |
 | Input is back on the test pattern after a restart | Expected: the selection is not persisted. Re-select Live HDMI or set `MTV_DEFAULT_SOURCE=hdmi` |
+| HDMI status says LIVE but the picture is black | Frames arrive and every pixel is black: the device feeding the adapter shows a blank second display. Wake it, un-blank or extend the display, put a window on it. The console and web page name this state `BLACK PICTURE` |
+| LED never lights, disk not fitted or sensor unwired | Expected: frames are clocked by the index pulse. Enable **Free-run output** for a bench test |
+| Errors flashed by in the console | Press F12 for the debug log, or read `~/.local/share/mechanical-tv/logs/mechanical-tv.log` |
 | HDMI status says ffmpeg exited | Read the quoted FFmpeg error; wrong `MTV_HDMI_FORMAT` is the usual cause (`uyvy422` for CSI, `mjpeg` for USB) |
 | HDMI goes black for a moment | Frames stopped for 5 s (source slept or changed mode); the service reopens the device by itself |
 

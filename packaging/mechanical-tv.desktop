@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Mechanical TV
+Comment=Mechanical television operator console (HDMI capture, Nipkow disk sync, LED output)
+Exec=/usr/bin/python3 -m mechanical_tv.app --env-file /etc/mechanical-tv/environment --fullscreen
+Path=/opt/mechanical-tv/current
+Icon=video-display
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=television;nipkow;hdmi;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true

@@ -18,9 +18,10 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
-from .capture import FramePipeline, HDMICapture, WIDTH, HEIGHT, FRAME_PIXELS
-from .core import Library, Player, MAX_UPLOAD, RESERVE_BYTES
-from .hardware import RealtimeController, MockMotorDriver
+from .capture import HDMICapture, WIDTH, HEIGHT
+from .core import MAX_UPLOAD, RESERVE_BYTES
+from .logs import setup_logging
+from .studio import Studio, load_env_file
 
 STATIC = Path(__file__).parent / 'static'
 
@@ -50,60 +51,15 @@ def set_password(root):
     os.chmod(path, 0o600)
 
 
-class Application:
-    def __init__(
-        self,
-        root,
-        hdmi_device='/dev/video0',
-        motor_port=1,
-        opto_pin=4,
-        led_pin=21,
-        use_spi_led=False,
-        force_mock=False,
-        hdmi_options=None,
-        default_source='pattern',
-    ):
-        self.root = Path(root)
-        self.auth = json.loads((self.root / 'auth.json').read_text())
-        self.library = Library(self.root / 'media')
-        self.player = Player(self.library)
-        self.pipeline = FramePipeline(hdmi_device=hdmi_device, **(hdmi_options or {}))
-        self.realtime = RealtimeController(
-            pipeline=self.pipeline,
-            motor_port=motor_port,
-            opto_pin=opto_pin,
-            led_pin=led_pin,
-            use_spi_led=use_spi_led,
-            force_mock=force_mock,
-        )
-        if default_source == 'hdmi':
-            # Start capture (and the EDID load an HDMI source depends on) at boot instead of waiting for a browser.
-            self.realtime.set_source_mode('hdmi')
+class Application(Studio):
+    """The Studio engine plus password sessions for the browser interface."""
+
+    def __init__(self, root, **studio_options):
+        self.auth = json.loads((Path(root) / 'auth.json').read_text())
         self.sessions = {}
         self.session_lock = threading.Lock()
         self.attempts = deque()
-        self.upload_lock = threading.Lock()
-        self.stopping = threading.Event()
-        self.started = time.monotonic()
-        self.worker = threading.Thread(target=self.work, daemon=True, name='conversion-worker')
-        self.worker.start()
-
-    def work(self):
-        while not self.stopping.wait(0.5):
-            try:
-                # Do not begin new conversions during playback or active motor scanning.
-                if self.player.snapshot()['state'] == 'playing' or self.realtime.state in ('running', 'locked', 'ramping'):
-                    continue
-                for item in self.library.items():
-                    if item['status'] == 'queued':
-                        self.library.prepare(item['id'])
-                        break
-            except Exception as exc:
-                print(f'Worker error: {type(exc).__name__}', flush=True)
-
-    def close(self):
-        self.stopping.set()
-        self.realtime.close()
+        super().__init__(root, **studio_options)
 
     def login(self, password):
         with self.session_lock:
@@ -125,40 +81,6 @@ class Application:
     def authenticated(self, token):
         with self.session_lock:
             return self.sessions.get(token, 0) > time.monotonic()
-
-    def health(self):
-        disk = shutil.disk_usage(self.root)
-        temperature = None
-        try:
-            temperature = int(Path('/sys/class/thermal/thermal_zone0/temp').read_text()) / 1000
-        except (OSError, ValueError):
-            pass
-        rt_status = self.realtime.get_status()
-        hw_enabled = not isinstance(self.realtime.motor.driver, MockMotorDriver)
-        return {
-            'version': __version__,
-            'mode': 'realtime' if hw_enabled else 'realtime-simulation',
-            'hardware_enabled': hw_enabled,
-            'uptime_seconds': int(time.monotonic() - self.started),
-            'worker_alive': self.worker.is_alive(),
-            'disk_free_bytes': disk.free,
-            'disk_total_bytes': disk.total,
-            'temperature_c': temperature,
-            'load_average': os.getloadavg(),
-            'ffmpeg': bool(shutil.which('ffmpeg')),
-            'ffprobe': bool(shutil.which('ffprobe')),
-            'v4l2_ctl': bool(shutil.which('v4l2-ctl')),
-            'profile': {'width': WIDTH, 'height': HEIGHT, 'fps': self.realtime.target_fps},
-            'realtime': rt_status,
-            'hardware': {
-                'computer': 'Raspberry Pi 4 Model B',
-                'motor_hat': 'Adafruit DC & Stepper Motor HAT (PCA9685 @ 0x60)',
-                'motor': 'NEMA 17 Stepper (200 steps/rev)',
-                'opto_sensor': f'Photoelectric index on GPIO {self.realtime.sensor.pin}',
-                'led_modulator': f'High-power LED on GPIO {self.realtime.led.pin}',
-                'hdmi_input': f'{self.realtime.pipeline.hdmi.device} ({self.realtime.pipeline.hdmi.bridge} adapter)',
-            }
-        }
 
 
 class Server(ThreadingHTTPServer):
@@ -352,6 +274,11 @@ class Handler(BaseHTTPRequestHandler):
                     self.app.realtime.stop()
                 elif action == 'emergency_blank':
                     self.app.realtime.emergency_blank()
+                elif action == 'free_run':
+                    enabled = body.get('enabled')
+                    if not isinstance(enabled, bool):
+                        raise ValueError('free_run needs "enabled": true or false')
+                    self.app.realtime.set_free_run(enabled)
                 elif action == 'speed':
                     val = body.get('fps', body.get('value', 10.0))
                     if not isinstance(val, (int, float)) or not math.isfinite(val):
@@ -362,10 +289,7 @@ class Handler(BaseHTTPRequestHandler):
                     clip_id = body.get('id')
                     path_str = None
                     if clip_id:
-                        item = self.app.library.get(clip_id)
-                        if item['status'] != 'ready':
-                            raise ValueError('Selected video is not ready')
-                        path_str = str(self.app.library.root / clip_id / 'frames.raw')
+                        path_str = self.app.clip_frames_path(clip_id)
                     self.app.realtime.set_source_mode(mode, library_path=path_str)
                 elif action == 'pattern':
                     pattern = body.get('pattern', 'smpte_bars')
@@ -464,15 +388,6 @@ class Handler(BaseHTTPRequestHandler):
             self.app.upload_lock.release()
 
 
-def load_env_file(path):
-    """Apply KEY=value lines (systemd EnvironmentFile syntax) as defaults for unset variables."""
-    for line in Path(path).read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith('#') or '=' not in line:
-            continue
-        key, value = line.split('=', 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-
 
 def main():
     pre = argparse.ArgumentParser(add_help=False)
@@ -495,7 +410,7 @@ def main():
     parser.add_argument('--hdmi-edid', default=os.environ.get('MTV_HDMI_EDID', 'auto'),
                         help='EDID hex file loaded into a CSI bridge: auto (packaged 1080p30), none, or a path')
     parser.add_argument('--hdmi-fit', choices=['fit', 'crop'], default=os.environ.get('MTV_HDMI_FIT', 'fit'))
-    parser.add_argument('--hdmi-backend', choices=['ffmpeg', 'opencv'], default=os.environ.get('MTV_HDMI_BACKEND', 'ffmpeg'))
+    parser.add_argument('--hdmi-backend', choices=['auto', 'v4l2', 'ffmpeg', 'opencv'], default=os.environ.get('MTV_HDMI_BACKEND', 'auto'))
     parser.add_argument('--default-source', choices=['pattern', 'hdmi'], default=os.environ.get('MTV_DEFAULT_SOURCE', 'pattern'),
                         help='video input selected at service start; hdmi starts capture and loads the EDID without a browser')
     parser.add_argument('--motor-port', type=int, default=int(os.environ.get('MTV_MOTOR_PORT', '1')))
@@ -542,6 +457,11 @@ def main():
     else:
         if not (Path(args.data) / 'auth.json').exists():
             raise SystemExit('Run python3 -m mechanical_tv.server init first.')
+        try:
+            # Same rotating log file as the local console, next to the library; journald still gets stdout.
+            setup_logging(Path(args.data) / 'logs')
+        except OSError as exc:
+            print(f'Log file unavailable: {exc}', flush=True)
         app = Application(
             args.data,
             hdmi_device=args.hdmi_device,

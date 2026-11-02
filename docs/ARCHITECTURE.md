@@ -23,7 +23,15 @@ flowchart TD
     LEDModulator["3W LED Pulse Modulator (GPIO 21 / SPI MOSI)\nThermal / Stall Safety Watchdog"]
   end
 
-  subgraph WebApp ["Web Studio & API"]
+  subgraph Studio ["Studio engine (studio.py)"]
+    Engine["Library · Pipeline · RealtimeController · conversion worker · log file"]
+  end
+
+  subgraph Console ["Local console (app.py, default)"]
+    Tk["Tk window on the Pi's display: previews, HUD, controls, debug log"]
+  end
+
+  subgraph WebApp ["Web Studio & API (server.py, MTV_UI=web)"]
     HTTP["Python Threading HTTPServer"]
     Browser["Operator Web UI (HUD, Preview, Controls)"]
   end
@@ -40,8 +48,10 @@ flowchart TD
   NipkowMapper --> LEDModulator
   LEDModulator -->|Light Pulses| Disk
 
-  HTTP <--> FramePipeline
-  HTTP <--> HardwareEngine
+  Engine --- FramePipeline
+  Engine --- HardwareEngine
+  Tk <-->|in-process calls| Engine
+  HTTP <-->|in-process calls| Engine
   Browser <-->|HTTP JSON & Live Frames| HTTP
 ```
 
@@ -50,7 +60,7 @@ flowchart TD
 ## 1. Video Pipeline
 
 1. **Ingest Modes:**
-   - **Live HDMI Capture:** Low-latency acquisition from the V4L2 device (`/dev/video0`) through an FFmpeg raw pipe (OpenCV optional). The adapter type is detected from `/sys/class/video4linux`: a TC358743 HDMI-to-CSI bridge gets its EDID loaded once per service run and its DV timings locked with `v4l2-ctl` before each open, and streams UYVY; a USB UVC dongle streams MJPEG. A dead FFmpeg, a 5 s stall or a missing signal clears the frame (black on the disk), is reported in telemetry and the journal, and triggers a reopen every second. Each `start()` is a new worker generation; a stale worker can neither register a capture process nor release its successor's, so stop/start races cannot orphan FFmpeg. The input defaults to the test pattern at startup unless `MTV_DEFAULT_SOURCE=hdmi`.
+   - **Live HDMI Capture:** Low-latency acquisition from the V4L2 device (`/dev/video0`). For a UYVY source (the CSI bridge) the default backend is the in-process reader in `mechanical_tv/v4l2.py`: ctypes ioctls, four memory-mapped driver buffers, each frame dequeued and requeued immediately, and 15 frames per second sampled sparsely with numpy into the disk frame and a 320 × 250 RGB preview. FFmpeg (one raw RGB pipe carrying the preview stacked over the disk frame, see `build_ffmpeg_filter`) is the fallback and the MJPEG path for USB dongles; OpenCV is optional. The adapter type is detected from `/sys/class/video4linux`: a TC358743 HDMI-to-CSI bridge gets its EDID loaded once per service run and its DV timings locked with `v4l2-ctl` before each open, and streams UYVY; a USB UVC dongle streams MJPEG. A dead FFmpeg, a 5 s stall or a missing signal clears the frame (black on the disk), is reported in telemetry and the journal, and triggers a reopen every second. Each `start()` is a new worker generation; a stale worker can neither register a capture process nor release its successor's, so stop/start races cannot orphan FFmpeg. The input defaults to the test pattern at startup unless `MTV_DEFAULT_SOURCE=hdmi`.
    - **Procedural Test Patterns:** Algorithmic patterns generated at target frame rate without external files (SMPTE grayscale bars, horizontal/vertical ramps, alignment grid with crosshair, rotating phase sync bar, 1 Hz photodiode pulse test).
    - **Media Library:** Looping prepared 32 × 25 grayscale video files.
 2. **Normalization:**
@@ -91,6 +101,7 @@ flowchart TD
   - Jitter measurement: standard deviation between target period and measured period.
 - **Sync Lock:**
   - When measured FPS is within $\pm 3\%$ of target FPS and jitter is $< 2.0\text{ ms}$ across 5 consecutive revolutions, `sync_locked` is asserted.
+- **Free-run output clock:** `RealtimeController.set_free_run(True)` starts a timer thread at `1 / target_fps` that feeds the LED watchdog, serializes the newest frame, pulses the LED and updates the preview; the index callback then only trims motor speed. Disabling joins the thread, blanks the LED and returns clocking to the sensor. `emergency_blank()` and `close()` always leave free-run; `stop()` does not.
 - **Closed-Loop Speed Trim (PLL):**
   - Period error $e_p = T_{target} - T_{measured}$.
   - Proportional adjustment trims the microsecond step delay: $\Delta \tau = K_p \times e_p$.
@@ -126,7 +137,7 @@ flowchart TD
 | `POST /api/logout` | Terminate session |
 | `GET /api/state` | Unified state: Player snapshot, Library items, Realtime telemetry |
 | `GET /api/realtime/status` | Comprehensive hardware status (RPM, Target, Lock, Jitter, Watchdog, LED Duty) |
-| `POST /api/realtime/control` | Hardware control commands (`start`, `stop`, `emergency_blank`, `speed`, `source`, `pattern`, `calibration`) |
+| `POST /api/realtime/control` | Hardware control commands (`start`, `stop`, `emergency_blank`, `free_run` with `enabled`, `speed` 1–24 FPS, `source`, `pattern`, `calibration`) |
 | `GET /api/realtime/frame` | Live 32 × 25 frame payload (800 bytes) for web canvas monitor |
 | `POST /api/upload` | Upload video file for background preparation |
 | `POST /api/player` | Media player commands (`play`, `pause`, `stop`, `seek`, `loop`, `brightness`) |
@@ -134,3 +145,11 @@ flowchart TD
 | `GET /api/preview/<id>` | Authenticated MP4 proxy preview stream |
 | `GET /api/health` | Hardware components, Pi temperature, storage, CPU load |
 | `GET /api/diagnostics` | Downloadable sanitized diagnostics JSON report |
+
+---
+
+## 6. Interfaces and logging
+
+`studio.py` holds everything both interfaces share: library, player, frame pipeline, realtime controller, the conversion worker, file import and health. `server.py` subclasses it with password sessions and HTTP; `app.py` (the default since 0.2.1) is a Tk window that calls it in-process from a worker thread, so slow hardware calls never block painting, and paints the controller's latest 32 × 25 frame as a PGM image with integer zoom ten times a second. `logs.py` gives both a rotating file (`<data>/logs/mechanical-tv.log`), mirrors `print()` output into it, records uncaught thread exceptions, and feeds a queue the console's debug window drains.
+
+HDMI telemetry reports `frame_peak`, `frame_mean`, `picture`, `backend` and `preview` so a locked signal that carries only black is named as such instead of looking like a dead capture. Measured on a Pi 4B with a 1080p30 UYVY source, FFmpeg used two full cores and the driver queue backed up into a 2-3 s delay; the in-process V4L2 reader touches only the sampled rows of each converted frame (about 8 ms each, 15 per second) and keeps the delay to one frame. Buffers the driver flags as bad are requeued unseen; a short frame is skipped, not reopened. Both backends put full-range luma on the disk (video black 16 maps to 0) so calibration carries across them. FFmpeg still runs with `-fflags nobuffer -flags low_delay` where it is used.

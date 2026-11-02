@@ -11,6 +11,8 @@ import threading
 import time
 from typing import Callable, Deque, Dict, List, Optional
 
+MAX_FPS = 24.0  # speed ceiling: 1440 RPM; above ~20 FPS the stepper may stall and the LED pixel slot drops below 55 us
+
 
 class BaseOptoSensor(ABC):
     """Abstract interface for the photoelectric index sensor."""
@@ -165,7 +167,7 @@ class GPIOOptoSensor(BaseOptoSensor):
 
     def set_target_fps(self, fps: float) -> None:
         with self._lock:
-            self.target_fps = max(1.0, min(20.0, float(fps)))
+            self.target_fps = max(1.0, min(MAX_FPS, float(fps)))
 
     def _handle_edge(self) -> None:
         now = time.perf_counter()

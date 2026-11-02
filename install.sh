@@ -15,6 +15,23 @@ if [[ ! -t 0 ]]; then
   exit 1
 fi
 
+# Interface:
+#   local (default) - the operator console runs on the Pi's own desktop (python3 -m mechanical_tv.app), started
+#                     with the desktop session, full screen. No web server, password or browser.
+#   web             - the password-protected HTTP service on port 8080 (python3 -m mechanical_tv.server).
+# Choose with:  sudo MTV_UI=web bash install.sh
+ui_mode="${MTV_UI:-local}"
+case "$ui_mode" in
+  local|web) ;;
+  *) echo "MTV_UI must be 'local' or 'web' (got '$ui_mode')." >&2; exit 1 ;;
+esac
+# The desktop user who will run the local console: the account that ran sudo.
+desktop_user="${SUDO_USER:-}"
+if [[ "$ui_mode" == local && ( -z "$desktop_user" || "$desktop_user" == root ) ]]; then
+  echo 'Local mode needs the desktop user: run  sudo bash install.sh  from that account (not as root).' >&2
+  exit 1
+fi
+
 # Motor driver:
 #   a4988 (default) - STEP/DIR driver (A4988 / DRV8825 / TMC2209) clocked by the Pi's hardware PWM.
 #                     STEP = GPIO 18, DIR = GPIO 23, ENABLE = GPIO 24. See docs/INSTALL.md, section 'Motor driver'.
@@ -34,7 +51,7 @@ fi
 apt-get update
 apt-get install -y python3 ffmpeg curl python3-pip python3-smbus i2c-tools v4l-utils || true
 # Hardware libraries, installed one at a time so a missing package can't block the others
-for pkg in python3-lgpio python3-smbus2; do
+for pkg in python3-lgpio python3-smbus2 python3-tk python3-numpy; do
   apt-get install -y "$pkg" || true
 done
 python3 -c 'import sys; assert sys.version_info >= (3,11), "Python 3.11+ required"'
@@ -43,6 +60,10 @@ if ! id mechanical-tv >/dev/null 2>&1; then
 fi
 # Add service user to hardware device groups
 usermod -a -G i2c,gpio,video mechanical-tv 2>/dev/null || true
+if [[ "$ui_mode" == local ]]; then
+  # The desktop user drives the hardware directly from the console window.
+  usermod -a -G i2c,gpio,video,spi "$desktop_user" 2>/dev/null || true
+fi
 # Enable I2C interface on Raspberry Pi if raspi-config is present
 if command -v raspi-config >/dev/null 2>&1; then
   raspi-config nonint do_i2c 0 2>/dev/null || true
@@ -99,10 +120,17 @@ if [[ ! -f /var/lib/mechanical-tv/auth.json ]]; then
 fi
 if [[ ! -f /etc/mechanical-tv/environment ]]; then
   printf '%s\n' 'MTV_DATA=/var/lib/mechanical-tv' 'MTV_HOST=0.0.0.0' 'MTV_PORT=8080' \
-    'MTV_HDMI_DEVICE=/dev/video0' '# MTV_DEFAULT_SOURCE=hdmi starts capture at boot (default: pattern)' \
+    'MTV_HDMI_DEVICE=/dev/video0' '# MTV_DEFAULT_SOURCE=hdmi starts capture at boot (web default: pattern; local console: hdmi when the device exists)' \
     '# MTV_HDMI_BRIDGE=auto|csi|usb  MTV_HDMI_FORMAT=auto|uyvy422|mjpeg|none  MTV_HDMI_EDID=auto|none|/path  MTV_HDMI_FIT=fit|crop' \
+    '# MTV_HDMI_BACKEND=auto|v4l2|ffmpeg|opencv  (auto: in-process V4L2 reader for the CSI bridge, FFmpeg otherwise)' \
     > /etc/mechanical-tv/environment
   chmod 0644 /etc/mechanical-tv/environment
+fi
+# The motor driver choice must reach the local console too (the web service also gets it from its drop-in).
+if grep -q '^MTV_MOTOR_DRIVER=' /etc/mechanical-tv/environment; then
+  sed -i "s/^MTV_MOTOR_DRIVER=.*/MTV_MOTOR_DRIVER=$motor_driver/" /etc/mechanical-tv/environment
+else
+  printf 'MTV_MOTOR_DRIVER=%s\n' "$motor_driver" >> /etc/mechanical-tv/environment
 fi
 # Stop before backing up SQLite. Never copy a live database as an update backup.
 systemctl stop mechanical-tv.service 2>/dev/null || true
@@ -132,6 +160,49 @@ rm -f "$dropin_dir/lgpio.conf" "$dropin_dir/motor.conf" "$dropin_dir/a4988.conf"
 } > "$dropin_dir/10-hardware.conf"
 chmod 0644 "$dropin_dir/10-hardware.conf"
 systemctl daemon-reload
+
+# ---------------------------------------------------------------------------------------------
+# Local console (default): a desktop launcher plus an autostart entry for the desktop user, and the
+# web service disabled so the two never fight over /dev/video0, the GPIOs and the PWM channel.
+# ---------------------------------------------------------------------------------------------
+if [[ "$ui_mode" == local ]]; then
+  systemctl disable --now mechanical-tv.service 2>/dev/null || true
+  install -m 0644 "$project_dir/packaging/mechanical-tv.desktop" /usr/share/applications/mechanical-tv.desktop
+  desktop_home="$(getent passwd "$desktop_user" | cut -d: -f6)"
+  if [[ "${MTV_AUTOSTART:-1}" == 1 && -d "$desktop_home" ]]; then
+    install -d -m 0755 -o "$desktop_user" -g "$desktop_user" "$desktop_home/.config" "$desktop_home/.config/autostart"
+    install -m 0644 -o "$desktop_user" -g "$desktop_user" "$project_dir/packaging/mechanical-tv.desktop" "$desktop_home/.config/autostart/mechanical-tv.desktop"
+  fi
+  # Verify the console can import its engine and Tk without opening a window.
+  if ! (cd /opt/mechanical-tv/current && runuser -u "$desktop_user" -- /usr/bin/python3 -m mechanical_tv.app --check --env-file /etc/mechanical-tv/environment > /tmp/mechanical-tv-check.json); then
+    echo 'Console check failed (is python3-tk installed?). Report: /tmp/mechanical-tv-check.json' >&2
+    cat /tmp/mechanical-tv-check.json >&2 || true
+    if [[ -n "$previous_release" && "$previous_release" != /opt/mechanical-tv/current && -d "$previous_release" ]]; then
+      ln -sfn "$previous_release" /opt/mechanical-tv/current
+      echo 'Restored the previous application directory.' >&2
+    fi
+    exit 1
+  fi
+  if [[ "$reboot_needed" == true ]]; then
+    echo "Added A4988 boot settings to $boot_config (backup: $boot_config.mechanical-tv.bak)."
+    echo 'Reboot to finish:  sudo reboot'
+    echo 'The Mechanical TV console opens full screen when the desktop starts.'
+    exit 0
+  fi
+  echo "Mechanical TV console installed (motor driver: $motor_driver)."
+  echo "It opens full screen with the desktop. Start it now from the menu (Sound & Video > Mechanical TV) or with:"
+  echo "  python3 -m mechanical_tv.app --env-file /etc/mechanical-tv/environment"
+  echo "Run from /opt/mechanical-tv/current. F11 full screen, F12 debug log, Ctrl+Q quit. Log file: ~/.local/share/mechanical-tv/logs/"
+  echo "Log out and back in once so the new hardware group memberships (gpio, i2c, video, spi) apply."
+  echo "Web interface instead:  sudo MTV_UI=web bash install.sh"
+  exit 0
+fi
+
+# Remove a local-mode autostart entry so the web service alone owns the hardware.
+if [[ -n "$desktop_user" && "$desktop_user" != root ]]; then
+  desktop_home="$(getent passwd "$desktop_user" | cut -d: -f6)"
+  rm -f "$desktop_home/.config/autostart/mechanical-tv.desktop"
+fi
 
 if [[ "$reboot_needed" == true ]]; then
   systemctl enable mechanical-tv.service

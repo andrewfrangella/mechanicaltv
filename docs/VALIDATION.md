@@ -21,6 +21,8 @@ Coverage includes:
 - Monotonic-clock simulation with deterministic test time.
 - Recovery of interrupted uploads; invalid IDs and damaged prepared data.
 - Corrupt video failure without stopping the conversion worker.
+- Free-run output: frames and LED pulses without index pulses, pacing at the target speed, no double clocking when pulses arrive, emergency blank and close leaving free-run, the 24 FPS ceiling, and the `free_run` API action (`tests/test_free_run.py`).
+- Local console: PGM framing, default-source resolution, the `--check` report, data-directory fallback, file import into the library, the logging module (file, queue, `print()` capture, tracebacks) and, when a display is available, the real Tk window: refresh loop, free-run through the action queue, zoomed preview size, debug window and error counter (`tests/test_local_app.py`; the window test is skipped without `DISPLAY`).
 
 No test drives a motor or LED. No hardware or real-time behavior is verified by these tests.
 
@@ -93,6 +95,6 @@ Requires actual motor speed/index measurements, LED current and pulse timing mea
 - [ ] USB UVC dongle still captures as MJPEG with `MTV_HDMI_BRIDGE` unset.
 - [ ] Flip the input selector repeatedly while a source is attached: no orphaned `ffmpeg` in `ps`, the journal shows clean reopen cycles.
 
-Automated coverage in `tests/test_capture.py`: adapter detection from sysfs, FFmpeg argv per adapter, CSI preparation order with a fake `v4l2-ctl` (EDID once, timings per open, no FFmpeg before lock), dead FFmpeg and stalled stream detection (frame cleared, child reaped, reopen), stop() during a slow open leaving no orphaned process, worker recovery from an unexpected exception, black output in HDMI mode without signal, `MTV_DEFAULT_SOURCE=hdmi` at startup, `doctor --env-file`, and EDID structure and checksums.
+Automated coverage in `tests/test_capture.py`: adapter detection from sysfs, FFmpeg argv per adapter, CSI preparation order with a fake `v4l2-ctl` (EDID once, timings per open, no FFmpeg before lock), dead FFmpeg and stalled stream detection (frame cleared, child reaped, reopen), stop() during a slow open leaving no orphaned process, worker recovery from an unexpected exception, black output in HDMI mode without signal, `MTV_DEFAULT_SOURCE=hdmi` at startup, `doctor --env-file`, and EDID structure and checksums. `tests/test_v4l2.py` covers the in-process reader: struct sizes and ioctl numbers against values compiled from `<linux/videodev2.h>`, letterbox placement, UYVY sampling of a synthetic 1080p frame (colour, letterbox rows, crop mode, raw luma on the disk), and the worker with a fake reader (frames flow, every buffer is requeued, stop() closes the device, explicit `v4l2` reports failures, `auto` falls back to FFmpeg, USB dongles never use it).
 
 No actual Pi, capture adapter, HAT or physical output validation has been performed for this change.

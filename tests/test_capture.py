@@ -10,14 +10,18 @@ import time
 import unittest
 
 from mechanical_tv.server import Application, password_hash
+from mechanical_tv import __version__
 from mechanical_tv.capture import (
+    FFMPEG_FRAME_BYTES,
     FRAME_PIXELS,
     FramePipeline,
     HDMICapture,
     PACKAGED_EDID,
+    PREVIEW_BYTES,
     build_ffmpeg_command,
     detect_csi_bridge,
     parse_dv_timings,
+    split_ffmpeg_frame,
 )
 
 REPO = Path(__file__).resolve().parent.parent
@@ -38,6 +42,7 @@ class FakeFFmpegCapture(HDMICapture):
     RETRY_DELAY = 0.1
 
     def __init__(self, script, device, bridge="usb", **kwargs):
+        kwargs.setdefault("backend", "ffmpeg")
         super().__init__(device=device, bridge=bridge, **kwargs)
         self.script = script
         self.spawned = []
@@ -57,7 +62,12 @@ class CommandTests(unittest.TestCase):
         args = build_ffmpeg_command("/dev/v4l/by-id/capture", "crop", "mjpeg")
         self.assertLess(args.index("-input_format"), args.index("-i"))
         self.assertEqual(args[args.index("-input_format") + 1], "mjpeg")
-        self.assertIn("fps=10,scale=32:25:force_original_aspect_ratio=increase,crop=32:25,setsar=1,format=gray", args)
+        graph = args[args.index("-filter_complex") + 1]
+        self.assertIn("[0:v]fps=10,split=2", graph)
+        self.assertIn("scale=32:25:force_original_aspect_ratio=increase,crop=32:25,setsar=1,format=gray", graph)
+        self.assertIn("scale=320:250:force_original_aspect_ratio=decrease,pad=320:250:", graph)
+        self.assertTrue(graph.endswith("vstack"))
+        self.assertEqual(args[args.index("-pix_fmt") + 1], "rgb24")
         self.assertEqual(args[-1], "pipe:1")
 
     def test_csi_bridge_uses_uyvy_and_none_lets_ffmpeg_negotiate(self):
@@ -65,6 +75,20 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(args[args.index("-input_format") + 1], "uyvy422")
         self.assertIn("pad=32:25:(ow-iw)/2:(oh-ih)/2,setsar=1,format=gray", " ".join(args))
         self.assertNotIn("-input_format", build_ffmpeg_command("/dev/video0", "fit", "none"))
+
+    def test_split_ffmpeg_frame_takes_disk_rows_from_below_the_preview(self):
+        preview = bytes([7]) * PREVIEW_BYTES
+        disk_rows = b""
+        for y in range(25):
+            row = bytearray(320 * 3)
+            for x in range(32):
+                row[x * 3] = row[x * 3 + 1] = row[x * 3 + 2] = (y * 32 + x) % 256
+            disk_rows += bytes(row)
+        got_preview, frame = split_ffmpeg_frame(preview + disk_rows)
+        self.assertEqual(got_preview, preview)
+        self.assertEqual(frame, bytes((i % 256) for i in range(FRAME_PIXELS)))
+        with self.assertRaises(ValueError):
+            split_ffmpeg_frame(preview)
 
     def test_parse_dv_timings(self):
         text = "\tActive width: 1920\n\tActive height: 1080\n\tPixelclock: 74250000 Hz (30.00 frames per second)\n"
@@ -120,21 +144,24 @@ class FailureReportingTests(unittest.TestCase):
     def test_fragmented_frame_then_exit_is_reported_and_frame_cleared(self):
         script = (
             "import os, sys, time\n"
-            "os.write(1, b'a' * 123); time.sleep(0.05); os.write(1, b'a' * 677)\n"
+            f"os.write(1, b'a' * 123); time.sleep(0.05); os.write(1, b'a' * {FFMPEG_FRAME_BYTES - 123})\n"
             "time.sleep(0.6); sys.stderr.write('boom: bad input format\\n'); sys.exit(3)\n"
         )
         cap = FakeFFmpegCapture(script, str(self.device))
         cap.start()
         try:
             self.assertTrue(wait_for(lambda: cap.get_frame() == b"a" * FRAME_PIXELS), cap.get_telemetry())
+            self.assertEqual(cap.get_preview(), b"a" * PREVIEW_BYTES)
             telem = cap.get_telemetry()
             self.assertTrue(telem["connected"])
             self.assertTrue(telem["signal"])
+            self.assertTrue(telem["preview"])
             self.assertEqual(telem["backend"], "ffmpeg")
             self.assertTrue(wait_for(lambda: "boom" in cap.get_telemetry()["error"]), cap.get_telemetry())
             telem = cap.get_telemetry()
             self.assertIn("exited (3)", telem["error"])
             self.assertIsNone(cap.get_frame(), "a dead capture must not leave a frozen frame on the disk")
+            self.assertIsNone(cap.get_preview(), "nor a frozen picture in the preview")
             self.assertFalse(telem["signal"])
             # The worker keeps retrying rather than sleeping forever.
             self.assertTrue(wait_for(lambda: len(cap.spawned) >= 2))
@@ -181,7 +208,7 @@ class FailureReportingTests(unittest.TestCase):
             pipeline.close()
 
 
-FRAME_SCRIPT = "import os, time\nwhile True:\n    os.write(1, b'b' * 800); time.sleep(0.05)\n"
+FRAME_SCRIPT = f"import os, time\nwhile True:\n    os.write(1, b'b' * {FFMPEG_FRAME_BYTES}); time.sleep(0.05)\n"
 
 FAKE_V4L2_CTL = """#!/usr/bin/env python3
 import os, sys
@@ -313,7 +340,7 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(app.realtime.pipeline.source_mode, "hdmi")
             self.assertTrue(app.realtime.pipeline.hdmi.get_telemetry()["running"])
             self.assertTrue(wait_for(lambda: "not found" in app.realtime.pipeline.hdmi.get_telemetry()["error"]))
-            self.assertEqual(app.health()["version"], "0.2.0")
+            self.assertEqual(app.health()["version"], __version__)
         finally:
             app.close()
 
@@ -362,19 +389,31 @@ class EdidTests(unittest.TestCase):
 class RealFFmpegTests(unittest.TestCase):
     def test_live_filter_graph_without_capture_hardware(self):
         args = build_ffmpeg_command("/dev/video0", "fit", "mjpeg")
-        start, end = args.index("-f"), args.index("-vf")
-        args[start:end] = ["-f", "lavfi", "-i", "testsrc2=size=160x120:rate=30", "-t", "0.5"]
-        result = subprocess.run(args, capture_output=True, check=True, timeout=30)
-        self.assertEqual(len(result.stdout), FRAME_PIXELS * 5)
-        self.assertGreater(len(set(result.stdout)), 10)
+        start, end = args.index("-f"), args.index("-filter_complex")
+        args[start:end] = ["-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30", "-t", "0.5"]
+        result = subprocess.run(args, capture_output=True, check=True, timeout=60)
+        self.assertEqual(len(result.stdout), FFMPEG_FRAME_BYTES * 5)
+        preview, frame = split_ffmpeg_frame(result.stdout[:FFMPEG_FRAME_BYTES])
+        self.assertEqual(len(frame), FRAME_PIXELS)
+        self.assertGreater(len(set(frame)), 10)
+        # 16:9 into 32x25: rows 0-2 and 21-24 are letterbox, rows 3-20 carry the picture.
+        self.assertFalse(any(frame[:3 * 32]))
+        self.assertFalse(any(frame[21 * 32:]))
+        self.assertTrue(any(frame[3 * 32:4 * 32]))
+        # The preview letterbox snaps to the 10-pixel lattice: 30 black rows above a 180-row picture.
+        self.assertFalse(any(preview[:30 * 320 * 3]))
+        self.assertTrue(any(preview[30 * 320 * 3:31 * 320 * 3]))
+        self.assertFalse(any(preview[210 * 320 * 3:]))
 
     def test_crop_filter_graph(self):
         args = build_ffmpeg_command("/dev/video0", "crop", "uyvy422")
-        start, end = args.index("-f"), args.index("-vf")
+        start, end = args.index("-f"), args.index("-filter_complex")
         args[start:end] = ["-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=30", "-t", "0.3"]
-        result = subprocess.run(args, capture_output=True, check=True, timeout=30)
-        self.assertEqual(len(result.stdout) % FRAME_PIXELS, 0)
-        self.assertGreaterEqual(len(result.stdout) // FRAME_PIXELS, 2)
+        result = subprocess.run(args, capture_output=True, check=True, timeout=60)
+        self.assertEqual(len(result.stdout) % FFMPEG_FRAME_BYTES, 0)
+        self.assertGreaterEqual(len(result.stdout) // FFMPEG_FRAME_BYTES, 2)
+        _, frame = split_ffmpeg_frame(result.stdout[:FFMPEG_FRAME_BYTES])
+        self.assertTrue(any(frame[:32]) and any(frame[24 * 32:]), "crop mode fills every disk row")
 
 
 if __name__ == "__main__":

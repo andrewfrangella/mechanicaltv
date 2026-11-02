@@ -219,6 +219,12 @@ nav .active {
   background: rgba(105, 219, 124, 0.08);
 }
 
+.pill.free-run {
+  border-color: var(--warn);
+  color: var(--warn);
+  background: rgba(255, 212, 59, 0.08);
+}
+
 .pill.ramping, .pill.running {
   border-color: var(--warn);
   color: var(--warn);

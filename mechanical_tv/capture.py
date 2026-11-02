@@ -20,17 +20,30 @@ import time
 from typing import Dict, List, Optional, Union
 
 try:
-    import cv2
     import numpy as np
-    HAS_CV2 = True
+    HAS_NUMPY = True
 except ImportError:
-    HAS_CV2 = False
-    cv2 = None
     np = None
+    HAS_NUMPY = False
+try:
+    import cv2
+    HAS_CV2 = HAS_NUMPY
+except ImportError:
+    cv2 = None
+    HAS_CV2 = False
+
+from . import v4l2 as native
+from .v4l2 import NATIVE_FPS, PREVIEW_BYTES, PREVIEW_H, PREVIEW_W
 
 WIDTH = 32
 HEIGHT = 25
 FRAME_PIXELS = WIDTH * HEIGHT  # 800 pixels
+assert (native.WIDTH, native.HEIGHT) == (WIDTH, HEIGHT)
+CAPTURE_FPS = 10  # frames per second the FFmpeg path delivers
+# One FFmpeg output frame: the 320x250 RGB preview with the 32x25 disk frame (as RGB, padded to
+# 320 wide) stacked beneath it, so a single raw pipe carries both pictures in lockstep.
+FFMPEG_FRAME_BYTES = PREVIEW_W * (PREVIEW_H + HEIGHT) * 3
+BLACK_LEVEL = 20  # 8-bit level at or below which a captured frame counts as black (video black is 16)
 
 
 def build_gamma_lut(gamma: float = 1.8, contrast: float = 1.0) -> bytes:
@@ -365,23 +378,45 @@ def parse_dv_timings(text: str):
     )
 
 
+def build_ffmpeg_filter(fit: str = "fit") -> str:
+    """Filter graph: one input, 10 fps, the RGB preview stacked over the 32x25 disk frame."""
+    if fit == "crop":
+        disk = (f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+                f"crop={WIDTH}:{HEIGHT},setsar=1,format=gray")
+    else:
+        disk = (f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
+                f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=gray")
+    # Letterbox offsets snap to the 10-pixel cell lattice so the bars cover whole disk rows.
+    preview = (f"scale={PREVIEW_W}:{PREVIEW_H}:force_original_aspect_ratio=decrease,"
+               f"pad={PREVIEW_W}:{PREVIEW_H}:floor((ow-iw)/20)*10:floor((oh-ih)/20)*10,setsar=1,format=rgb24")
+    return (f"[0:v]fps={CAPTURE_FPS},split=2[pv][dk];[pv]{preview}[preview];"
+            f"[dk]{disk},format=rgb24,pad={PREVIEW_W}:{HEIGHT}:0:0[disk];[preview][disk]vstack")
+
+
 def build_ffmpeg_command(device: str, fit: str = "fit", input_format: str = "mjpeg", ffmpeg: str = "ffmpeg") -> List[str]:
-    """FFmpeg argv: V4L2 in, 10 fps 32x25 8-bit grayscale raw frames on stdout.
+    """FFmpeg argv: V4L2 in, 10 fps raw RGB frames of FFMPEG_FRAME_BYTES on stdout (see build_ffmpeg_filter).
 
     input_format is a V4L2 pixel/codec name: "mjpeg" for USB dongles, "uyvy422" for the
     TC358743 CSI bridge, or "none" to let FFmpeg negotiate.
     """
-    if fit == "crop":
-        vf = (f"fps=10,scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
-              f"crop={WIDTH}:{HEIGHT},setsar=1,format=gray")
-    else:
-        vf = (f"fps=10,scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
-              f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=gray")
     cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-f", "v4l2"]
     if input_format and input_format.lower() not in ("auto", "none"):
         cmd += ["-input_format", input_format]
-    cmd += ["-i", str(device), "-vf", vf, "-pix_fmt", "gray", "-f", "rawvideo", "pipe:1"]
+    # Low latency: no demuxer read-ahead and no decoder frame delay, so a captured frame reaches
+    # the pipe (and the disk) as soon as it is scaled instead of queueing behind buffered ones.
+    cmd += ["-fflags", "nobuffer", "-flags", "low_delay"]
+    cmd += ["-i", str(device), "-filter_complex", build_ffmpeg_filter(fit),
+            "-pix_fmt", "rgb24", "-f", "rawvideo", "pipe:1"]
     return cmd
+
+
+def split_ffmpeg_frame(buf: bytes) -> "tuple[bytes, bytes]":
+    """(preview RGB bytes, 32x25 grayscale frame) from one FFMPEG_FRAME_BYTES output frame."""
+    if len(buf) != FFMPEG_FRAME_BYTES:
+        raise ValueError(f"expected {FFMPEG_FRAME_BYTES} bytes, got {len(buf)}")
+    row = PREVIEW_W * 3
+    frame = b"".join(buf[PREVIEW_BYTES + y * row:PREVIEW_BYTES + y * row + WIDTH * 3:3] for y in range(HEIGHT))
+    return buf[:PREVIEW_BYTES], frame
 
 
 def downscale_bgr(frame, fit: str = "fit"):
@@ -449,7 +484,7 @@ class HDMICapture(VideoSource):
         fit: str = "fit",
         input_format: str = "auto",
         edid: Optional[str] = "auto",
-        backend: str = "ffmpeg",
+        backend: str = "auto",
         bridge: str = "auto",
     ):
         if isinstance(device, int):
@@ -458,7 +493,10 @@ class HDMICapture(VideoSource):
         self.fit = fit if fit in ("fit", "crop") else "fit"
         self.input_format_setting = ((input_format or "").strip().lower()) or "auto"
         self.edid_setting = ((str(edid) if edid is not None else "").strip()) or "auto"
-        self.backend = ((backend or "").strip().lower()) or "ffmpeg"
+        self.backend = ((backend or "").strip().lower()) or "auto"
+        if self.backend not in ("auto", "v4l2", "ffmpeg", "opencv"):
+            print(f"HDMI capture: unknown backend '{self.backend}' (want auto, v4l2, ffmpeg or opencv); using auto", flush=True)
+            self.backend = "auto"
         self.bridge_setting = ((bridge or "").strip().lower()) or "auto"
         self._bridge = self.bridge_setting if self.bridge_setting in ("csi", "usb") else ""
         self._running = False
@@ -469,6 +507,11 @@ class HDMICapture(VideoSource):
         self._state_lock = threading.Lock()   # guards the _cap / _ffmpeg_proc / _connected handoff
         self._cap = None
         self._ffmpeg_proc: Optional[subprocess.Popen] = None
+        self._reader: Optional[native.V4L2Reader] = None
+        self._sampler: Optional[native.UYVYSampler] = None
+        self._preview: Optional[bytes] = None
+        self._next_convert_at = 0.0
+        self._short_frames = 0
         self._stderr_tail: deque = deque(maxlen=12)
         self._connected = False
         self._opened_at = 0.0
@@ -476,6 +519,8 @@ class HDMICapture(VideoSource):
         self._input_height = 0
         self._input_fps = 0.0
         self._frame_count = 0
+        self._frame_peak = 0
+        self._frame_mean = 0.0
         self._read_failures = 0
         self._last_frame_at = 0.0
         self._error = ""
@@ -545,7 +590,12 @@ class HDMICapture(VideoSource):
             time.sleep(0.05)
 
     @staticmethod
-    def _release(cap, proc: Optional[subprocess.Popen]) -> None:
+    def _release(cap, proc: Optional[subprocess.Popen], reader=None) -> None:
+        if reader is not None:
+            try:
+                reader.close()
+            except Exception:
+                pass
         if cap is not None:
             try:
                 cap.release()
@@ -574,17 +624,21 @@ class HDMICapture(VideoSource):
                 return
             cap, self._cap = self._cap, None
             proc, self._ffmpeg_proc = self._ffmpeg_proc, None
+            reader, self._reader = self._reader, None
+            self._sampler = None
             self._connected = False
             with self._lock:
                 self._frame = None
-        self._release(cap, proc)
+                self._preview = None
+        self._release(cap, proc, reader)
 
-    def _register(self, generation: int, cap=None, proc: Optional[subprocess.Popen] = None) -> bool:
+    def _register(self, generation: int, cap=None, proc: Optional[subprocess.Popen] = None,
+                  reader=None, sampler=None) -> bool:
         """Publish a freshly opened device; refused when stop() ran or a newer worker exists."""
         with self._state_lock:
             if not self._current(generation):
                 return False
-            self._cap, self._ffmpeg_proc = cap, proc
+            self._cap, self._ffmpeg_proc, self._reader, self._sampler = cap, proc, reader, sampler
             self._connected = True
             self._opened_at = time.monotonic()
             self._error = ""
@@ -654,6 +708,20 @@ class HDMICapture(VideoSource):
             return False
         if not self._current(generation):
             return False  # stop() ran while v4l2-ctl was working; do not open a device nobody owns
+        if self.backend in ("auto", "v4l2"):
+            if self.input_format != "uyvy422":
+                if self.backend == "v4l2":
+                    self._log(f"native V4L2 backend needs UYVY input, not {self.input_format}; using ffmpeg")
+            else:
+                ok, why = native.available()
+                if ok:
+                    if self._open_native(generation):
+                        return True
+                    if self.backend == "v4l2":
+                        return False  # asked for explicitly: report the failure instead of hiding it behind ffmpeg
+                    self._log(f"{self._error}; using ffmpeg")
+                else:
+                    self._log(f"native V4L2 backend unavailable ({why}); using ffmpeg")
         if self.backend == "opencv":
             if HAS_CV2:
                 if self._open_opencv(generation):
@@ -661,6 +729,63 @@ class HDMICapture(VideoSource):
             else:
                 self._log("OpenCV backend requested but cv2 is not importable; using ffmpeg")
         return self._open_ffmpeg(generation)
+
+    def _open_native(self, generation: int) -> bool:
+        """Open the device through the in-process V4L2 reader (CSI bridge, UYVY)."""
+        try:
+            reader = native.V4L2Reader(self.device)
+        except (OSError, ValueError) as exc:   # ValueError: zero-length mmap or fd beyond select()'s range
+            self._error = f"native V4L2 open failed: {exc}"
+            return False
+        try:
+            sampler = native.UYVYSampler(reader.width, reader.height, reader.stride, self.fit)
+        except Exception as exc:
+            self._release(None, None, reader)
+            self._error = f"native V4L2 sampler failed: {exc}"
+            return False
+        if not self._register(generation, reader=reader, sampler=sampler):
+            self._release(None, None, reader)  # stop() or a newer worker won the race
+            return False
+        self._input_width, self._input_height = reader.width, reader.height
+        self._next_convert_at = time.monotonic()
+        self._short_frames = 0
+        self._log(f"opened {self.device} natively (V4L2 mmap, {reader.width}x{reader.height} UYVY, "
+                  f"{reader.buffer_count} buffers, {NATIVE_FPS:g} fps sampled)")
+        return True
+
+    def _read_native(self, generation: int) -> None:
+        reader, sampler = self._reader, self._sampler
+        if reader is None or sampler is None:
+            return
+        try:
+            got = reader.dequeue(0.5)
+        except OSError as exc:
+            self._fail(generation, f"V4L2 read error: {exc} (signal lost or mode changed); reopening")
+            return
+        if got is None:
+            if time.monotonic() - max(self._last_frame_at, self._opened_at) > self.STALL_TIMEOUT:
+                self._fail(generation, f"no frames for {self.STALL_TIMEOUT:g}s (source stopped or changed mode); reopening")
+            return
+        index, raw = got
+        got = None   # drop every reference to the mmap view before the buffer returns to the driver
+        now = time.monotonic()
+        if now >= self._next_convert_at:
+            interval = 1.0 / NATIVE_FPS
+            self._next_convert_at = max(self._next_convert_at + interval, now - interval)
+            try:
+                preview, frame = sampler.convert(raw)
+            except ValueError as exc:
+                # One bad frame is not worth a reopen; if they never stop, the stall timer reopens.
+                self._short_frames += 1
+                if self._short_frames in (1, 10, 100) or self._short_frames % 1000 == 0:
+                    self._log(f"skipped a short V4L2 frame ({exc}); {self._short_frames} so far")
+            else:
+                self._store(frame, preview)
+        raw = None
+        try:
+            reader.requeue(index)
+        except OSError as exc:
+            self._fail(generation, f"V4L2 requeue error: {exc}; reopening")
 
     def _open_opencv(self, generation: int) -> bool:
         try:
@@ -740,7 +865,9 @@ class HDMICapture(VideoSource):
                             self._sleep(self.RETRY_DELAY)
                             continue
                         buf.clear()
-                    if self._cap is not None:
+                    if self._reader is not None:
+                        self._read_native(generation)
+                    elif self._cap is not None:
                         self._read_opencv(generation)
                     elif self._ffmpeg_proc is not None:
                         self._read_ffmpeg(generation, buf)
@@ -754,10 +881,17 @@ class HDMICapture(VideoSource):
                 self._cleanup(generation)
                 self._running = False
 
-    def _store(self, frame: bytes) -> None:
+    def _store(self, frame: bytes, preview: Optional[bytes] = None) -> None:
+        # 800 bytes: max() and sum() cost a few microseconds and tell the operator whether a
+        # live signal carries a picture or a black one (a source showing a blank second display).
+        peak = max(frame) if frame else 0
+        mean = sum(frame) / len(frame) if frame else 0.0
         with self._lock:
             self._frame = frame
+            self._preview = preview
             self._frame_count += 1
+            self._frame_peak = peak
+            self._frame_mean = mean
         self._last_frame_at = time.monotonic()
 
     def _read_ffmpeg(self, generation: int, buf: bytearray) -> None:
@@ -767,14 +901,15 @@ class HDMICapture(VideoSource):
         try:
             fd = proc.stdout.fileno()
             ready, _, _ = select.select([fd], [], [], 0.5)
-            chunk = os.read(fd, FRAME_PIXELS - len(buf)) if ready else None
+            chunk = os.read(fd, FFMPEG_FRAME_BYTES - len(buf)) if ready else None
         except (OSError, ValueError) as exc:
             self._fail(generation, f"ffmpeg pipe error: {exc}")
             return
         if chunk:
             buf += chunk
-            if len(buf) == FRAME_PIXELS:
-                self._store(bytes(buf))
+            if len(buf) == FFMPEG_FRAME_BYTES:
+                preview, frame = split_ffmpeg_frame(bytes(buf))
+                self._store(frame, preview)
                 buf.clear()
             return
         if chunk == b"" or proc.poll() is not None:
@@ -813,15 +948,24 @@ class HDMICapture(VideoSource):
         with self._lock:
             return self._frame
 
+    def get_preview(self) -> Optional[bytes]:
+        """The latest full picture as PREVIEW_W x PREVIEW_H RGB bytes, or None without a live frame."""
+        with self._lock:
+            return self._preview
+
     def get_telemetry(self) -> Dict[str, object]:
         age = round(time.monotonic() - self._last_frame_at, 2) if self._last_frame_at else None
         signal = bool(self._connected and age is not None and age < self.STALL_TIMEOUT)
-        backend = "opencv" if self._cap is not None else ("ffmpeg" if self._ffmpeg_proc is not None else "")
+        backend = ("v4l2" if self._reader is not None else "opencv" if self._cap is not None
+                   else "ffmpeg" if self._ffmpeg_proc is not None else "")
         return {
             "type": "hdmi",
             "device": self.device,
             "bridge": self.bridge,
             "backend": backend,
+            "backend_setting": self.backend,
+            "preview": self._preview is not None,
+            "bad_frames": (self._reader.error_frames if self._reader is not None else 0) + self._short_frames,
             "input_format": self.input_format,
             "edid": self.edid_path,
             "edid_loaded": self._edid_loaded,
@@ -832,6 +976,9 @@ class HDMICapture(VideoSource):
             "input_fps": self._input_fps,
             "frames_captured": self._frame_count,
             "last_frame_age": age,
+            "frame_peak": self._frame_peak,
+            "frame_mean": round(self._frame_mean, 1),
+            "picture": bool(signal and self._frame_peak > BLACK_LEVEL),
             "error": self._error,
         }
 
@@ -917,7 +1064,7 @@ class FramePipeline:
         hdmi_fit: str = "fit",
         hdmi_format: str = "auto",
         hdmi_edid: Optional[str] = "auto",
-        hdmi_backend: str = "ffmpeg",
+        hdmi_backend: str = "auto",
         hdmi_bridge: str = "auto",
     ):
         self.hdmi = HDMICapture(
@@ -1041,6 +1188,12 @@ class FramePipeline:
         if not frame or len(frame) != FRAME_PIXELS:
             return bytes(FRAME_PIXELS)
         return frame
+
+    def get_source_preview(self) -> Optional[bytes]:
+        """Full-picture RGB preview (PREVIEW_W x PREVIEW_H) of the live HDMI input, else None."""
+        if self.source_mode == "hdmi":
+            return self.hdmi.get_preview()
+        return None
 
     def serialize_nipkow_stream(self, frame: bytes) -> bytes:
         """Serialize a 32x25 frame into the 800-pixel Nipkow pulse stream.
