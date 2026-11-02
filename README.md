@@ -8,7 +8,7 @@ A real-time display and synchronization appliance for a Raspberry Pi mechanical 
 
 ## What works
 
-- **Live HDMI Video Ingest:** Real-time capture from HDMI-to-USB/CSI capture devices (V4L2 `/dev/video0`), downscaled on the fly to 32 × 25 8-bit grayscale.
+- **Live HDMI Video Ingest:** Real-time V4L2 capture from an HDMI-to-CSI-2 adapter (Toshiba TC358743: GeeekPi/52Pi, Geekworm, Waveshare) or a USB UVC dongle, downscaled on the fly to 32 × 25 8-bit grayscale. For CSI adapters the service loads the EDID and locks DV timings itself; failures (no signal, dead FFmpeg, stalled stream) show in the UI and blank the disk instead of freezing.
 - **Procedural Test Patterns:** SMPTE grayscale bars, horizontal/vertical ramps, aperture alignment grid, rotating phase sync bar, 1 Hz photodiode pulse test, and sweeping single column.
 - **Motor Control & Velocity Profiling:** Drives a NEMA 17 stepper motor using the Adafruit DC & Stepper Motor HAT (PCA9685 @ I2C 0x60, TB6612 dual H-bridge). Soft-start acceleration ramping (1.0 to 10.0+ FPS / 60 to 600+ RPM) prevents motor inertia stall.
 - **Closed-Loop Optical Sync:** Photoelectric index sensor (BCM GPIO 4) detects the once-per-revolution disk notch, measuring rotation period, instantaneous RPM, jitter, and phase lock. A closed-loop PLL trims stepper intervals to eliminate drift.
@@ -29,7 +29,7 @@ A real-time display and synchronization appliance for a Raspberry Pi mechanical 
 | **LED Driver** | L298N or logic MOSFET driver | Logic input to BCM GPIO 21 (Pin 40) or SPI MOSI (Pin 19) |
 | **Light Source** | 3W High-power White or RGB LED | Heat-sink mounted, driven via L298N from dedicated supply |
 | **Power Supply** | Adjustable 9–12 V, 3 A supply | Connected to Adafruit Motor HAT external power terminals |
-| **Video Input** | HDMI-to-USB capture device | Connected to Pi 4 USB 3.0 port (`/dev/video0`) |
+| **Video Input** | HDMI-to-CSI-2 adapter (TC358743, e.g. GeeekPi/52Pi) or USB UVC capture dongle | CSI adapter on the CAMERA ribbon port with `dtoverlay=tc358743`; USB dongle on a USB 3.0 port. Both appear as `/dev/video0`. See [INSTALL.md](docs/INSTALL.md#hdmi-input) |
 
 > [!WARNING]
 > Keep the Raspberry Pi on its dedicated official 5V/3A USB-C supply. Do not power the Pi from the motor supply. Always heatsink the 3W LED.
@@ -49,7 +49,7 @@ Open **http://127.0.0.1:8080** and sign in using the application password you ju
 
 ## Install on Raspberry Pi OS
 
-Use Raspberry Pi OS 64-bit (Debian Bookworm or Bullseye):
+Use Raspberry Pi OS 64-bit (Debian Bookworm or newer; the installer requires Python 3.11+):
 
 ```bash
 sudo apt update
@@ -61,7 +61,7 @@ sudo bash install.sh
 
 The installer installs hardware packages (`i2c-tools`, `python3-smbus`, `v4l-utils`), adds the service user to `i2c`, `gpio`, and `video` groups, enables I2C, and starts the systemd service.
 
-Open `http://<Pi-IP-address>:8080` or `http://mechanical-tv.local:8080`.
+Open `http://<Pi-IP-address>:8080` or `http://<pi-hostname>.local:8080`.
 
 ## Documentation
 
@@ -71,7 +71,7 @@ Open `http://<Pi-IP-address>:8080` or `http://mechanical-tv.local:8080`.
 | [Architecture](docs/ARCHITECTURE.md) | Real-time synchronization loop, video capture pipeline, Nipkow coordinate mapping, and threading |
 | [Project Plan](docs/PROJECT_PLAN.md) | Hardware bring-up status, synchronization milestones, and roadmap |
 | [User Guide](docs/USER_GUIDE.md) | Realtime studio controls, optical calibration, test patterns, and troubleshooting |
-| [Installation](docs/INSTALL.md) | Pi OS setup, hotspot configuration, systemd permissions, and recovery |
+| [Installation](docs/INSTALL.md) | Pi OS setup, HDMI-to-CSI adapter (overlay, EDID, troubleshooting), settings, logs, and maintenance |
 | [Validation](docs/VALIDATION.md) | Test commands, test pattern verification, and physical bring-up checklist |
 
 ## Tests

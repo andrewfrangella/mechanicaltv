@@ -11,7 +11,7 @@ Power on → join Wi-Fi → open local page → sign in → choose input (Live H
 | Feature | Version 0.1.0 | Version 0.2.0 (Realtime First) | Follow-up |
 | --- | --- | --- | --- |
 | Password-protected local GUI | Implemented | Implemented | HTTPS deployment if requested |
-| Live HDMI video capture | Not implemented | **Implemented (V4L2 `/dev/video0`)** | Auto-resolution negotiation |
+| Live HDMI video capture | Not implemented | **Implemented (V4L2 `/dev/video0`; TC358743 CSI bridge EDID + timings automated; USB UVC)** | Validate on the GeeekPi adapter with a MacBook source |
 | Procedural calibration patterns | Not implemented | **Implemented (SMPTE, Ramp, Grid, Rotating Bar, Pulse)** | Custom SVG/vector patterns |
 | Nipkow coordinate serializer | Not implemented | **Implemented (bitluni spiral mapping $32 \times 25$)** | Custom disc spiral profiles |
 | Motor control & ramping | Not implemented | **Implemented (Adafruit Motor HAT + NEMA 17)** | Direct STEP/DIR driver option |
@@ -34,7 +34,7 @@ Power on → join Wi-Fi → open local page → sign in → choose input (Live H
    - Built Adafruit Motor HAT (PCA9685/TB6612) driver with velocity ramping to 600 RPM.
    - Built optical index sensor edge timing and closed-loop PLL.
    - Built 800-pixel LED pulse modulator matching bitluni's geometry with thermal watchdog protection.
-   - Updated web studio with real-time HUD telemetry, motor controls, and optical calibration.
+   - Updated the Realtime Studio page with real-time HUD telemetry, motor controls, and optical calibration.
 3. **Physical Hardware Bring-Up (Current Step):**
    - Wire Adafruit Motor HAT, NEMA 17 motor, optical sensor, and L298N LED driver as specified in `docs/HARDWARE.md`.
    - Run installer on Raspberry Pi 4 Model B and verify I2C detection (`i2cdetect -y 1`).
@@ -44,8 +44,8 @@ Power on → join Wi-Fi → open local page → sign in → choose input (Live H
    - Dial phase offset slider to center the frame in the aperture.
    - Verify scan direction (toggle Invert Horizontal/Vertical if necessary).
 5. **Live HDMI Video Playback:**
-   - Connect HDMI video source to USB capture card.
-   - Select "Live HDMI Video" in web studio.
+   - Connect the HDMI source to the capture adapter (HDMI-to-CSI bridge on the CAMERA port with `dtoverlay=tc358743`, or a USB dongle).
+   - Select "Live HDMI Video (capture adapter)" on the Realtime tab, or set `MTV_DEFAULT_SOURCE=hdmi` so capture starts at boot.
    - Enjoy real-time mechanical television display.
 6. **Optional Enhancements:**
    - Sequential RGB 3-color flashing for color mechanical TV.

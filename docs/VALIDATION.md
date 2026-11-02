@@ -38,7 +38,7 @@ Recorded during the initial build:
 
 GitHub Actions separately targets Python 3.11 on Ubuntu and its available FFmpeg. A workflow being present is not evidence that a hosted run has passed.
 
-Pi OS installer, systemd hardening/resource limits, hotspot commands, boot recovery, thermal behavior and sustained playback require validation on the actual Pi. The development environment is not Raspberry Pi OS.
+Pi OS installer, systemd hardening/resource limits, boot recovery, thermal behavior and sustained playback require validation on the actual Pi. The development environment is not Raspberry Pi OS.
 
 ## Browser acceptance
 
@@ -67,7 +67,7 @@ The script creates temporary credentials/media, starts its own localhost server,
 - [ ] Install on a fresh supported 64-bit Pi OS image.
 - [ ] Confirm source preview H.264 playback in intended client browsers.
 - [ ] Reboot and open the interface without desktop login; verify idle state.
-- [ ] Test HDMI capture with networking disconnected.
+- [ ] With `MTV_DEFAULT_SOURCE=hdmi`, reboot with networking disconnected and confirm capture starts without a browser.
 - [ ] Run a 30-minute loop, monitor memory, temperature, service stability, and browser behavior.
 - [ ] Upload/convert while idle; verify queue deferral during playback.
 - [ ] Interrupt an upload, restart during preparation, and verify recovery.
@@ -80,14 +80,19 @@ The script creates temporary credentials/media, starts its own localhost server,
 
 Requires actual motor speed/index measurements, LED current and pulse timing measurements, calibration images, loaded-disk tests, loss-of-sync behavior and independently verified stop behavior. Browser simulation must never substitute for these checks.
 
-## HDMI acceptance — pending actual hardware
+## HDMI acceptance — TC358743 CSI adapter, pending on hardware
 
-- Confirm Linux V4L2 compatibility and choose a stable capture path/mode.
-- Compare latest PGM to HDMI bars/gradient and test fit/crop.
-- Boot with no device; attach it and verify capture recovers.
-- Disconnect USB, stop HDMI source, and test reconnect separately (adapter no-signal behavior varies).
-- Verify stopped/stalled preview blanks and SIGTERM releases FFmpeg.
-- Run 30 minutes on Pi 4, checking temperature, memory and latency.
-- Reboot with networking disconnected; confirm capture without login/browser.
+- [ ] `dmesg | grep tc358743` reports the bridge and `v4l2-ctl --list-devices` shows unicam on `/dev/video0` after reboot.
+- [ ] Selecting Live HDMI logs `HDMI capture: EDID /opt/mechanical-tv/releases/<stamp>/mechanical_tv/edid/1080p30.txt loaded`; the MacBook lists a display named MechanicalTV at 1920 × 1080, 30 Hz within a few seconds.
+- [ ] With `MTV_DEFAULT_SOURCE=hdmi`, the same happens at boot with no browser open; without it, the input is the SMPTE pattern after a restart.
+- [ ] Status line reads `CSI · 1920x1080 @ 30 FPS · LIVE`; SMPTE bars from the Mac match bars on the disk; test `MTV_HDMI_FIT=crop`.
+- [ ] Unplug HDMI: within 5 s the status reads NO SIGNAL and the disk is black; replug: capture recovers without a restart.
+- [ ] Put the Mac to sleep and change its resolution: the service reopens the device each time.
+- [ ] Boot with no source attached: service healthy, no-signal reason shown; attach later and verify recovery.
+- [ ] 30-minute soak: FFmpeg CPU within `CPUQuota=150%`, memory under `MemoryMax=768M`, temperature, latency.
+- [ ] USB UVC dongle still captures as MJPEG with `MTV_HDMI_BRIDGE` unset.
+- [ ] Flip the input selector repeatedly while a source is attached: no orphaned `ffmpeg` in `ps`, the journal shows clean reopen cycles.
+
+Automated coverage in `tests/test_capture.py`: adapter detection from sysfs, FFmpeg argv per adapter, CSI preparation order with a fake `v4l2-ctl` (EDID once, timings per open, no FFmpeg before lock), dead FFmpeg and stalled stream detection (frame cleared, child reaped, reopen), stop() during a slow open leaving no orphaned process, worker recovery from an unexpected exception, black output in HDMI mode without signal, `MTV_DEFAULT_SOURCE=hdmi` at startup, `doctor --env-file`, and EDID structure and checksums.
 
 No actual Pi, capture adapter, HAT or physical output validation has been performed for this change.

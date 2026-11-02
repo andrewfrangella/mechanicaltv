@@ -101,13 +101,14 @@ $('rt-bright').addEventListener('change', () => {
 });
 
 // Source Switcher
-$('video-source').addEventListener('change', () => {
+let sourceChangedAt = 0; // syncSourceSelect() yields to the user for a moment after a change
+$('video-source').addEventListener('change', async () => {
   const val = $('video-source').value;
+  sourceChangedAt = Date.now();
   if (val === 'hdmi') {
     rtControl('source', { mode: 'hdmi' });
     $('stream-name').textContent = 'Live HDMI Capture';
-    $('source-status-text').textContent = 'HDMI /dev/video0';
-    $('source-empty').hidden = true;
+    $('source-status-text').textContent = 'HDMI · CONNECTING…';
   } else if (val === 'library') {
     if (!currentLibraryId) {
       notice('Select a video from the Media Library first.');
@@ -118,9 +119,9 @@ $('video-source').addEventListener('change', () => {
     $('stream-name').textContent = 'Library Video Clip';
     $('source-status-text').textContent = 'MEDIA FILE LOOP';
   } else {
-    // Pattern
-    rtControl('source', { mode: 'pattern' });
-    rtControl('pattern', { pattern: val });
+    // Pattern: switch mode first, then pick the pattern, so a refresh in between cannot snap the selector back.
+    await rtControl('source', { mode: 'pattern' });
+    await rtControl('pattern', { pattern: val });
     $('stream-name').textContent = `Test Pattern: ${val}`;
     $('source-status-text').textContent = 'PROCEDURAL PATTERN';
     $('source-empty').hidden = true;
@@ -178,9 +179,9 @@ function paint(pixels, brightness = 1.0) {
   }
   ctx.putImageData(frame, 0, 0);
 
-  // Also draw to source canvas if in pattern mode
+  // Draw to the source canvas for patterns and live HDMI; only library clips have a proxy video.
   const srcCanvas = $('source-canvas');
-  if (srcCanvas && !$('video-source').value.startsWith('hdmi') && $('video-source').value !== 'library') {
+  if (srcCanvas && $('video-source').value !== 'library') {
     srcCanvas.style.display = 'block';
     $('source').style.display = 'none';
     const sCtx = srcCanvas.getContext('2d');
@@ -274,6 +275,53 @@ async function command(action, value) {
 $('loop').addEventListener('change', () => command('loop', $('loop').checked));
 $('seek').addEventListener('change', () => command('seek', Number($('seek').value)));
 
+// Keep the input selector matching the server after a reload or another client's change.
+function syncSourceSelect(pipe) {
+  const select = $('video-source');
+  if (document.activeElement === select || Date.now() - sourceChangedAt < 2000) return;
+  const details = pipe.source_details || {};
+  let wanted = 'smpte_bars';
+  if (pipe.source_mode === 'hdmi') wanted = 'hdmi';
+  else if (pipe.source_mode === 'library') wanted = 'library';
+  else if (details.pattern) wanted = details.pattern;
+  if (select.value !== wanted && [...select.options].some(o => o.value === wanted)) {
+    select.value = wanted;
+    $('stream-name').textContent = wanted === 'hdmi' ? 'Live HDMI Capture'
+      : wanted === 'library' ? 'Library Video Clip' : `Test Pattern: ${wanted}`;
+  }
+}
+
+// Surface HDMI capture state (adapter type, signal, resolution, error) instead of a silent black panel.
+function showSourceStatus(pipe) {
+  const d = pipe.source_details || {};
+  const empty = $('source-empty');
+  if (pipe.source_mode === 'hdmi') {
+    const where = `HDMI ${d.device || ''} · ${(d.bridge || '').toUpperCase()}`;
+    let text;
+    if (d.signal) {
+      const fps = d.input_fps ? ` @ ${Number(d.input_fps).toFixed(0)} FPS` : '';
+      text = `${where} · ${d.input_resolution || '?'}${fps} · LIVE`;
+    } else if (d.connected) {
+      text = `${where} · WAITING FOR FRAMES`;
+    } else {
+      text = `${where} · NO SIGNAL`;
+    }
+    $('source-status-text').textContent = text;
+    $('source-format-label').textContent = d.signal ? `HDMI LIVE · ${(d.input_format || '').toUpperCase()}` : 'HDMI · NO SIGNAL';
+    empty.hidden = Boolean(d.signal);
+    if (!d.signal) {
+      empty.textContent = d.error || (d.connected
+        ? 'Source detected and timings locked; waiting for the first frame from FFmpeg. If this persists, read journalctl -u mechanical-tv for "ffmpeg exited" lines.'
+        : 'Waiting for an HDMI source. The source must show a second display.');
+    }
+  } else if (pipe.source_mode === 'library') {
+    $('source-format-label').textContent = 'H.264 PROXY';
+  } else {
+    $('source-format-label').textContent = 'PROCEDURAL PATTERN';
+    empty.hidden = true;
+  }
+}
+
 // Main Periodic Refresh Loop
 async function refresh() {
   if (polling) return;
@@ -335,6 +383,8 @@ async function refresh() {
       // Sync calibration controls if not focused
       if (rt.pipeline) {
         const pipe = rt.pipeline;
+        syncSourceSelect(pipe);
+        showSourceStatus(pipe);
         if (document.activeElement !== $('cal-phase')) {
           $('cal-phase').value = pipe.phase_offset || 0;
           $('cal-phase-val').textContent = `${pipe.phase_offset} px (${Math.round(pipe.phase_offset * 360 / 800)}°)`;
@@ -388,6 +438,8 @@ async function refreshHealth() {
     ['Uptime', clock(health.uptime_seconds)],
     ['FFmpeg', health.ffmpeg ? 'Available' : 'Missing'],
     ['FFprobe', health.ffprobe ? 'Available' : 'Missing'],
+    ['v4l2-ctl', health.v4l2_ctl ? 'Available' : 'Missing (apt install v4l-utils)'],
+    ['HDMI Input', (health.hardware && health.hardware.hdmi_input) || 'Unknown'],
   ];
 
   $('health').replaceChildren();
