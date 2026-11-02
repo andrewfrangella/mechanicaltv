@@ -39,7 +39,10 @@ if [[ ! -f /var/lib/mechanical-tv/auth.json ]]; then
   (cd "$release_dir" && runuser -u mechanical-tv -- python3 -m mechanical_tv.server init --data /var/lib/mechanical-tv)
 fi
 if [[ ! -f /etc/mechanical-tv/environment ]]; then
-  printf '%s\n' 'MTV_DATA=/var/lib/mechanical-tv' 'MTV_HOST=0.0.0.0' 'MTV_PORT=8080' > /etc/mechanical-tv/environment
+  printf '%s\n' 'MTV_DATA=/var/lib/mechanical-tv' 'MTV_HOST=0.0.0.0' 'MTV_PORT=8080' \
+    'MTV_HDMI_DEVICE=/dev/video0' '# MTV_DEFAULT_SOURCE=hdmi starts capture at boot (default: pattern)' \
+    '# MTV_HDMI_BRIDGE=auto|csi|usb  MTV_HDMI_FORMAT=auto|uyvy422|mjpeg|none  MTV_HDMI_EDID=auto|none|/path  MTV_HDMI_FIT=fit|crop' \
+    > /etc/mechanical-tv/environment
   chmod 0644 /etc/mechanical-tv/environment
 fi
 # Stop before backing up SQLite. Never copy a live database as an update backup.
@@ -75,6 +78,21 @@ if [[ "$healthy" != true ]]; then
   fi
   exit 1
 fi
+# An HDMI-to-CSI-2 adapter (TC358743) needs its kernel overlay. Print guidance; never edit boot config silently.
+boot_config=''
+for candidate in /boot/firmware/config.txt /boot/config.txt; do
+  if [[ -f "$candidate" ]]; then boot_config="$candidate"; break; fi
+done
+if [[ -n "$boot_config" ]] && ! grep -Eq '^[[:space:]]*dtoverlay=tc358743' "$boot_config"; then
+  cat <<EOF
+NOTE: $boot_config has no dtoverlay=tc358743. If the HDMI input is an HDMI-to-CSI-2 adapter
+(GeeekPi/52Pi, Geekworm, Waveshare, Auvidea B101) add these lines to it and reboot:
+  camera_auto_detect=0
+  dtoverlay=tc358743
+USB HDMI capture dongles need no change. See docs/INSTALL.md, section 'HDMI input'.
+EOF
+fi
 echo 'Mechanical TV is running in REALTIME mode.'
 echo "Open http://$(hostname).local:$configured_port or http://<Pi-IP-address>:$configured_port"
-echo 'No desktop login is required after reboot. See docs/INSTALL.md for hotspot setup.'
+echo "Select 'Live HDMI Video (capture adapter)' in the page to start capture, or set MTV_DEFAULT_SOURCE=hdmi in /etc/mechanical-tv/environment."
+echo 'See docs/INSTALL.md, section HDMI input.'

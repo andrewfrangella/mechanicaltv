@@ -1,11 +1,11 @@
-> This guide covers the optional web development studio. The default appliance uses unattended HDMI capture; see [INSTALL.md](INSTALL.md).
+> The Realtime tab (live HDMI, test patterns, motor, calibration) is the primary flow. This guide also covers the media library player. Adapter setup: [INSTALL.md](INSTALL.md#hdmi-input).
 
 # User guide
 
 ## Everyday flow
 
 1. Power on the Pi and allow it to boot.
-2. Join the same network, or the Pi's configured hotspot.
+2. Join the same network as the Pi.
 3. Open the app's local address and sign in.
 4. Open Library, choose a clip and framing, then Upload & prepare.
 5. Wait for READY. Select the video.
@@ -13,6 +13,10 @@
 7. Stop when finished. Shut down the Pi through the OS before removing power.
 
 Everything stays on the Pi. After an upload finishes, the laptop is no longer the media source. No internet or GitHub connection is required for playback.
+
+## Live HDMI input
+
+Select **Live HDMI Video (capture adapter)** in the Video Input selector on the Realtime tab. The selection is not remembered across a service restart or reboot (the input returns to the SMPTE pattern) unless the operator sets `MTV_DEFAULT_SOURCE=hdmi`; see INSTALL.md. The status line next to the selector (below it on narrow screens) reports the adapter type (CSI or USB), the input resolution and frame rate while frames flow as `LIVE`; `WAITING FOR FRAMES` while the device is open but no frame has arrived in the last 5 s; or `NO SIGNAL`, with the reason in the Source Video panel (device missing, no HDMI source detected, FFmpeg exit message). The Source Video panel shows the same 32 × 25 frame that is sent to the disk; there is no full-resolution browser preview of live HDMI. When frames stop, the last frame is held for at most 5 s and then the disk shows black, never a test pattern, while the service reopens the device every second. The selector follows the server, so a reload or another browser shows the active input.
 
 ## Player
 
@@ -61,7 +65,6 @@ Download diagnostics returns these basic values as JSON. It does not include pas
 | --- | --- |
 | Site unreachable | Confirm Wi-Fi/network, IP, port 8080, and service status over SSH |
 | `.local` name fails | Use the Pi's IP address; mDNS varies by network/client |
-| Hotspot says “No internet” | Expected for an offline hotspot; open the numeric local address |
 | Login rejected | Use the application password, not Wi-Fi/OS credentials; reset using INSTALL.md |
 | Too many login attempts | Wait one minute; rate limit is shared across clients |
 | Preparation remains queued | Stop playback; wait for the preceding conversion |
@@ -70,5 +73,11 @@ Download diagnostics returns these basic values as JSON. It does not include pas
 | Page loses connection | Pi may still be playing. Reconnect; do not assume the display stopped |
 | Source preview does not play | Try a browser with H.264 support; prepared TV preview is separate |
 | Picture looks too small | Try Crop on a new upload; low resolution is intentional |
+| HDMI status says device not found | USB dongle unplugged, or `dtoverlay=tc358743` missing for a CSI adapter; see INSTALL.md |
+| HDMI status says no HDMI signal on the CSI bridge | The source must show a second display named MechanicalTV. Check the ribbon is in CAMERA, the overlay is loaded, the EDID line appeared in the journal, and follow "If the Mac shows no display" in INSTALL.md (`v4l2-ctl --log-status`) |
+| HDMI status stays at WAITING FOR FRAMES | Timings locked but FFmpeg delivers nothing; read `journalctl -u mechanical-tv -f` for `ffmpeg exited` lines and check `MTV_HDMI_FORMAT` |
+| Input is back on the test pattern after a restart | Expected: the selection is not persisted. Re-select Live HDMI or set `MTV_DEFAULT_SOURCE=hdmi` |
+| HDMI status says ffmpeg exited | Read the quoted FFmpeg error; wrong `MTV_HDMI_FORMAT` is the usual cause (`uyvy422` for CSI, `mjpeg` for USB) |
+| HDMI goes black for a moment | Frames stopped for 5 s (source slept or changed mode); the service reopens the device by itself |
 
-Calibration, gamma, crop-position adjustment, HDMI input, RGB, and hardware control are roadmap features, not hidden settings.
+RGB output and crop-position adjustment are roadmap features. Live HDMI, calibration, gamma, contrast and motor control are on the Realtime tab.

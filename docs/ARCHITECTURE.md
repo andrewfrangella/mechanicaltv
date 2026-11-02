@@ -50,7 +50,7 @@ flowchart TD
 ## 1. Video Pipeline
 
 1. **Ingest Modes:**
-   - **Live HDMI Capture:** Low-latency acquisition via V4L2 device (`/dev/video0`) using OpenCV VideoCapture or direct FFmpeg raw pipe.
+   - **Live HDMI Capture:** Low-latency acquisition from the V4L2 device (`/dev/video0`) through an FFmpeg raw pipe (OpenCV optional). The adapter type is detected from `/sys/class/video4linux`: a TC358743 HDMI-to-CSI bridge gets its EDID loaded once per service run and its DV timings locked with `v4l2-ctl` before each open, and streams UYVY; a USB UVC dongle streams MJPEG. A dead FFmpeg, a 5 s stall or a missing signal clears the frame (black on the disk), is reported in telemetry and the journal, and triggers a reopen every second. Each `start()` is a new worker generation; a stale worker can neither register a capture process nor release its successor's, so stop/start races cannot orphan FFmpeg. The input defaults to the test pattern at startup unless `MTV_DEFAULT_SOURCE=hdmi`.
    - **Procedural Test Patterns:** Algorithmic patterns generated at target frame rate without external files (SMPTE grayscale bars, horizontal/vertical ramps, alignment grid with crosshair, rotating phase sync bar, 1 Hz photodiode pulse test).
    - **Media Library:** Looping prepared 32 × 25 grayscale video files.
 2. **Normalization:**

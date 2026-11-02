@@ -6,7 +6,7 @@ This document specifies the verified electrical connections, pinouts, timing cal
        +-----------------------------------------------------------+
        |                  Raspberry Pi 4 Model B                   |
        |                                                           |
-       |   [USB 3.0 Port] <====== HDMI Capture Dongle (/dev/video0)|
+       |   [CAMERA CSI-2 port] <== HDMI-to-CSI adapter (TC358743)  |
        |                                                           |
        |   40-Pin Header:                                          |
        |     * I2C SDA (GPIO 2, Pin 3)  ===> Adafruit Motor HAT    |
@@ -45,13 +45,13 @@ This document specifies the verified electrical connections, pinouts, timing cal
 
 | Subsystem | Part | Specification |
 | --- | --- | --- |
-| **Main Computer** | Raspberry Pi 4 Model B | 64-bit OS, USB 3.0 for capture, I2C bus 1, hardware timers |
+| **Main Computer** | Raspberry Pi 4 Model B | 64-bit OS, CSI-2 camera port (or USB 3.0) for capture, I2C bus 1, hardware timers |
 | **Motor HAT** | Adafruit DC & Stepper Motor HAT (Mini Kit) | PCA9685 16-channel 12-bit PWM controller (I2C 0x60), dual TB6612 H-bridges (1.2 A continuous, 3 A peak) |
 | **Drive Motor** | STEPPERONLINE 17HE08-1004S NEMA 17 | 1.8° step angle (200 full steps/rev, 400 half-steps/rev), 1 A/phase, 3.6 Ω resistance, 4 mH inductance |
 | **Index Sensor** | Slotted Photoelectric Interrupter | Transmissive optical switch reading synchronization notch on outer rim of Nipkow disk once per revolution |
 | **LED Driver** | L298N Dual H-Bridge | Switched via Pi GPIO 21 (or SPI MOSI Pin 19) to modulate LED current |
 | **Light Source** | 3W High-Power LED | White (or 3W RGB for later phase), mounted on finned aluminum heatsink |
-| **Video Ingest** | USB HDMI Video Capture (UVC / V4L2) | MacroSilicon MS2109 or standard CamLink dongle presenting as `/dev/video0` |
+| **Video Ingest** | HDMI-to-CSI-2 adapter (GeeekPi/52Pi EP-0214, Toshiba TC358743) | On the CAMERA ribbon port; `/dev/video0` via the unicam driver with `dtoverlay=tc358743`. Needs an EDID and DV timings, which the service loads itself. A USB UVC dongle (MS2109) also works. |
 | **Motor Supply** | Minidodoca Adjustable 3–24 V (Set to 9–12 V) | Dedicated power supply for motor HAT and LED power rails |
 
 ---
@@ -96,6 +96,14 @@ The STEPPERONLINE 17HE08-1004S has 4 leads arranged into two independent phase c
 - **OUT1 & OUT2:** Connected in series with a 3W LED and a 2.7 Ω – 3.3 Ω, 5 W current-limiting power resistor (or a dedicated 700 mA buck constant-current LED driver).
 - The 3W LED generates significant heat: **mount it to a finned aluminum star heatsink with thermal paste.**
 
+### 5. HDMI Input Adapter (TC358743 HDMI-to-CSI-2)
+
+- **Connector:** the Pi 4 **CAMERA** port, the 15-pin FPC socket between the micro-HDMI ports and the 3.5 mm jack. The identical DISPLAY socket next to the microSD end does not work, and the adapter's red LED lights in either because it only indicates 3.3 V from the ribbon.
+- **Cable:** 15-pin, 1 mm pitch, 2 CSI lanes on the Pi 4. The 22-pin end of a dual cable is for CM4 / Pi 5.
+- **Bandwidth:** two lanes carry 1080p30 (1080p50 in UYVY) or 720p60, not 1080p60. The packaged EDID advertises only 1080p30 and 720p60.
+- **Software contract:** `dtoverlay=tc358743` in the boot configuration, then the service loads the EDID, locks DV timings and captures UYVY (see INSTALL.md). Without an EDID the HDMI source never detects a display.
+- **Alternative:** a USB UVC capture dongle on a USB 3.0 port needs none of this and is captured as MJPEG.
+
 ---
 
 ## Timing and Synchronization Mechanics
@@ -109,6 +117,10 @@ The STEPPERONLINE 17HE08-1004S has 4 leads arranged into two independent phase c
 - **Target Motor Speed:** $10.0\text{ rev/s} \times 60 = 600.0\text{ RPM}$.
 - **Revolution Duration ($T_{rev}$):** $100.0\text{ ms} = 0.1\text{ s}$.
 - **Pixel Slot Duration ($T_{pixel}$):** $\frac{100.0\text{ ms}}{800} = 125.0\ \mu\text{s}$ (8.0 kHz pixel clock).
+
+### Printed Disk
+
+bitluni's STL has a 0.6 mm plate; it flexes at speed and breaks when it is pressed on or off the shaft. `3d_models/nipkow_disk.scad` reproduces his geometry with a 2.4 mm plate (hub, bore, hole spiral and notch unchanged) and renders to `3d_models/nipkow_disk_2.4mm.stl`, which prints in one piece on a 256 mm bed. The rim passes through the index sensor slot, so the plate must be at least 1.5 mm thinner than the slot. Parameters, print settings and the sensor check are in [3d_models/README.md](../3d_models/README.md).
 
 ### Motor Stepping Rate
 

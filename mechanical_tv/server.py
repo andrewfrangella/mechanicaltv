@@ -18,7 +18,7 @@ import time
 from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
-from .capture import FramePipeline, WIDTH, HEIGHT, FRAME_PIXELS
+from .capture import FramePipeline, HDMICapture, WIDTH, HEIGHT, FRAME_PIXELS
 from .core import Library, Player, MAX_UPLOAD, RESERVE_BYTES
 from .hardware import RealtimeController, MockMotorDriver
 
@@ -60,12 +60,14 @@ class Application:
         led_pin=21,
         use_spi_led=False,
         force_mock=False,
+        hdmi_options=None,
+        default_source='pattern',
     ):
         self.root = Path(root)
         self.auth = json.loads((self.root / 'auth.json').read_text())
         self.library = Library(self.root / 'media')
         self.player = Player(self.library)
-        self.pipeline = FramePipeline(hdmi_device=hdmi_device)
+        self.pipeline = FramePipeline(hdmi_device=hdmi_device, **(hdmi_options or {}))
         self.realtime = RealtimeController(
             pipeline=self.pipeline,
             motor_port=motor_port,
@@ -74,6 +76,9 @@ class Application:
             use_spi_led=use_spi_led,
             force_mock=force_mock,
         )
+        if default_source == 'hdmi':
+            # Start capture (and the EDID load an HDMI source depends on) at boot instead of waiting for a browser.
+            self.realtime.set_source_mode('hdmi')
         self.sessions = {}
         self.session_lock = threading.Lock()
         self.attempts = deque()
@@ -142,6 +147,7 @@ class Application:
             'load_average': os.getloadavg(),
             'ffmpeg': bool(shutil.which('ffmpeg')),
             'ffprobe': bool(shutil.which('ffprobe')),
+            'v4l2_ctl': bool(shutil.which('v4l2-ctl')),
             'profile': {'width': WIDTH, 'height': HEIGHT, 'fps': self.realtime.target_fps},
             'realtime': rt_status,
             'hardware': {
@@ -150,7 +156,7 @@ class Application:
                 'motor': 'NEMA 17 Stepper (200 steps/rev)',
                 'opto_sensor': f'Photoelectric index on GPIO {self.realtime.sensor.pin}',
                 'led_modulator': f'High-power LED on GPIO {self.realtime.led.pin}',
-                'hdmi_input': str(self.realtime.pipeline.hdmi.device)
+                'hdmi_input': f'{self.realtime.pipeline.hdmi.device} ({self.realtime.pipeline.hdmi.bridge} adapter)',
             }
         }
 
@@ -458,14 +464,40 @@ class Handler(BaseHTTPRequestHandler):
             self.app.upload_lock.release()
 
 
+def load_env_file(path):
+    """Apply KEY=value lines (systemd EnvironmentFile syntax) as defaults for unset variables."""
+    for line in Path(path).read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
 def main():
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument('--env-file')
+    pre_args, _ = pre.parse_known_args()
+    if pre_args.env_file:
+        load_env_file(pre_args.env_file)
     parser = argparse.ArgumentParser(description='Mechanical TV realtime hardware appliance')
+    parser.add_argument('--env-file', help='read MTV_* defaults from a KEY=value file, e.g. /etc/mechanical-tv/environment')
     parser.add_argument('command', choices=['init', 'serve', 'reset-password', 'doctor'], nargs='?', default='serve')
     parser.add_argument('--data', default=os.environ.get('MTV_DATA', './data'))
     parser.add_argument('--host', default=os.environ.get('MTV_HOST', '127.0.0.1'))
     parser.add_argument('--port', type=int, default=int(os.environ.get('MTV_PORT', '8080')))
     parser.add_argument('--mock-hardware', action='store_true', default=bool(os.environ.get('MTV_MOCK_HARDWARE') == '1'))
     parser.add_argument('--hdmi-device', default=os.environ.get('MTV_HDMI_DEVICE', '/dev/video0'))
+    parser.add_argument('--hdmi-bridge', choices=['auto', 'csi', 'usb'], default=os.environ.get('MTV_HDMI_BRIDGE', 'auto'),
+                        help='csi: TC358743 HDMI-to-CSI-2 adapter (needs EDID + timings); usb: UVC dongle')
+    parser.add_argument('--hdmi-format', default=os.environ.get('MTV_HDMI_FORMAT', 'auto'),
+                        help='V4L2 input format for ffmpeg: auto (uyvy422 for csi, mjpeg for usb), none, or a name')
+    parser.add_argument('--hdmi-edid', default=os.environ.get('MTV_HDMI_EDID', 'auto'),
+                        help='EDID hex file loaded into a CSI bridge: auto (packaged 1080p30), none, or a path')
+    parser.add_argument('--hdmi-fit', choices=['fit', 'crop'], default=os.environ.get('MTV_HDMI_FIT', 'fit'))
+    parser.add_argument('--hdmi-backend', choices=['ffmpeg', 'opencv'], default=os.environ.get('MTV_HDMI_BACKEND', 'ffmpeg'))
+    parser.add_argument('--default-source', choices=['pattern', 'hdmi'], default=os.environ.get('MTV_DEFAULT_SOURCE', 'pattern'),
+                        help='video input selected at service start; hdmi starts capture and loads the EDID without a browser')
     parser.add_argument('--motor-port', type=int, default=int(os.environ.get('MTV_MOTOR_PORT', '1')))
     parser.add_argument('--opto-pin', type=int, default=int(os.environ.get('MTV_OPTO_PIN', '4')))
     parser.add_argument('--led-pin', type=int, default=int(os.environ.get('MTV_LED_PIN', '21')))
@@ -478,14 +510,32 @@ def main():
         set_password(args.data)
         print('Restart the service to invalidate existing sessions and load the new password.')
     elif args.command == 'doctor':
+        probe = HDMICapture(device=args.hdmi_device, fit=args.hdmi_fit, input_format=args.hdmi_format,
+                            edid=args.hdmi_edid, backend=args.hdmi_backend, bridge=args.hdmi_bridge)
+        try:
+            auth_configured = (Path(args.data) / 'auth.json').exists()
+            data_exists = Path(args.data).is_dir()
+            data_access = 'ok'
+        except OSError as exc:  # e.g. PermissionError on the 0700 appliance data directory without sudo
+            auth_configured = data_exists = False
+            data_access = f'{type(exc).__name__}: run with sudo'
         results = {
             'python': os.sys.version.split()[0],
             'ffmpeg': shutil.which('ffmpeg'),
             'ffprobe': shutil.which('ffprobe'),
-            'auth_configured': (Path(args.data) / 'auth.json').exists(),
-            'data_exists': Path(args.data).is_dir(),
+            'data': str(args.data),
+            'data_access': data_access,
+            'auth_configured': auth_configured,
+            'data_exists': data_exists,
             'i2c_available': os.path.exists('/dev/i2c-1'),
+            'v4l2_ctl': shutil.which('v4l2-ctl'),
             'hdmi_device_exists': os.path.exists(args.hdmi_device),
+            'hdmi_bridge': probe.bridge if os.path.exists(args.hdmi_device) else 'device missing',
+            'hdmi_input_format': probe.input_format,
+            'hdmi_edid': probe.edid_path or None,
+            'hdmi_fit': probe.fit,
+            'hdmi_backend': probe.backend,
+            'default_source': args.default_source,
         }
         print(json.dumps(results, indent=2))
         raise SystemExit(0 if results['auth_configured'] and results['data_exists'] else 1)
@@ -495,11 +545,19 @@ def main():
         app = Application(
             args.data,
             hdmi_device=args.hdmi_device,
+            hdmi_options={
+                'hdmi_bridge': args.hdmi_bridge,
+                'hdmi_format': args.hdmi_format,
+                'hdmi_edid': args.hdmi_edid,
+                'hdmi_fit': args.hdmi_fit,
+                'hdmi_backend': args.hdmi_backend,
+            },
             motor_port=args.motor_port,
             opto_pin=args.opto_pin,
             led_pin=args.led_pin,
             use_spi_led=args.spi_led,
             force_mock=args.mock_hardware,
+            default_source=args.default_source,
         )
         server = Server((args.host, args.port), Handler)
         server.app = app
