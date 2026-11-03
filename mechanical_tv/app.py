@@ -31,6 +31,7 @@ os.environ.setdefault("LG_WD", "/tmp")
 from . import __version__  # noqa: E402
 from .capture import WIDTH, HEIGHT, FRAME_PIXELS, HDMICapture  # noqa: E402
 from .hardware.controller import MAX_FPS  # noqa: E402
+from .hardware.motor import ramp_rate_from_env  # noqa: E402
 from .logs import LOGGER, setup_logging, log_exception  # noqa: E402
 from .studio import Studio, load_env_file  # noqa: E402
 
@@ -102,6 +103,7 @@ def check_report(args) -> dict:
         "ffmpeg": shutil.which("ffmpeg"),
         "v4l2_ctl": shutil.which("v4l2-ctl"),
         "motor_driver": os.environ.get("MTV_MOTOR_DRIVER", "hat"),
+        "ramp_rate_fps": ramp_rate_from_env(),
         "hardware_pwm": bool(sorted(Path("/sys/class/pwm").glob("pwmchip*"))) if Path("/sys/class/pwm").exists() else False,
         "gpiochip": os.path.exists("/dev/gpiochip0"),
         "i2c": os.path.exists("/dev/i2c-1"),

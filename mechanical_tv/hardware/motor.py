@@ -20,6 +20,28 @@ import threading
 import time
 from typing import Dict, List, Optional
 
+DEFAULT_RAMP_RATE = 2.0   # FPS gained (or shed) per second while the motor changes speed
+MIN_RAMP_RATE, MAX_RAMP_RATE = 0.1, 50.0
+
+
+def ramp_rate_from_env() -> float:
+    """MTV_RAMP_RATE in FPS per second, clamped to a sane range; the default when unset or malformed.
+
+    A heavier disk needs more torque to accelerate, and the stepper has only so much: lowering the
+    ramp (0.5 is a 20 s spin-up to 10 FPS) is the software side of keeping it from stalling.
+    """
+    raw = os.environ.get("MTV_RAMP_RATE", "").strip()
+    if not raw:
+        return DEFAULT_RAMP_RATE
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_RAMP_RATE
+    if value != value:  # NaN
+        return DEFAULT_RAMP_RATE
+    return max(MIN_RAMP_RATE, min(MAX_RAMP_RATE, value))
+
+
 MAX_FPS = 24.0  # speed ceiling: 1440 RPM; above ~20 FPS the stepper may stall and the LED pixel slot drops below 55 us
 
 
@@ -570,6 +592,7 @@ class MotorController:
     original in-process thread. Environment overrides:
       MTV_MOTOR_PROCESS=0   use the old thread instead of a separate process
       MTV_STEP_MODE=full    full-step (200 steps/rev) instead of half-step (400)
+      MTV_RAMP_RATE=2.0     FPS per second of acceleration (lower for a heavy disk, e.g. 0.5)
     """
 
     STEPS_PER_REV = 400  # 400 half-steps per rev (NEMA 17 200 full steps * 2)
@@ -578,8 +601,10 @@ class MotorController:
         self,
         driver: Optional[BaseMotorDriver] = None,
         target_fps: float = 10.0,
-        ramp_rate_fps: float = 2.0,
+        ramp_rate_fps: Optional[float] = None,
     ):
+        if ramp_rate_fps is None:
+            ramp_rate_fps = ramp_rate_from_env()
         self.driver = driver or MockMotorDriver()
         is_hat = isinstance(self.driver, AdafruitMotorHATDriver)
         if is_hat and os.environ.get("MTV_STEP_MODE", "half").strip().lower() == "full":
@@ -780,6 +805,7 @@ class MotorController:
             "target_rpm": self.target_fps * 60.0,
             "current_fps": round(self.current_fps, 2),
             "current_rpm": round(self.current_fps * 60.0, 1),
+            "ramp_rate_fps": self.ramp_rate_fps,
             "trim_us": self._trim_us,
             "driver": driver_tel,
         }

@@ -154,7 +154,7 @@ Within each $125\ \mu\text{s}$ pixel slot:
 
 ## Safety Features
 
-1. **Velocity Ramping (Soft Start):** Stepper motors cannot instantaneously accelerate from 0 to 600 RPM without stalling. The software controller accelerates smoothly from 1.0 FPS up to target 10.0 FPS over 2 seconds.
+1. **Velocity Ramping (Soft Start):** Stepper motors cannot instantaneously accelerate from 0 to 600 RPM without stalling. The software controller accelerates smoothly from a crawl to the target speed at `MTV_RAMP_RATE` FPS per second (default 2.0: about 5 s to 10 FPS). A heavier disk needs a gentler ramp, for example 0.5, and more coil current: on an A4988 that is the Vref trim pot (I = Vref / (8 × Rsense)) and, for torque at speed, a higher motor supply voltage (the A4988 takes up to 35 V; the 12 V limit above applies to the Adafruit HAT only).
 2. **Thermal & Stall Watchdog:** If the motor stalls, if the disk is stopped, or if no optical index pulse arrives within 350 ms, the software automatically cuts power to the LED pin (`blank()`).
 3. **Coil De-Energizing:** When the motor is commanded to stop, all TB6612 H-bridge outputs are disabled (`release()`), preventing the motor from drawing holding current and overheating while stationary.
 4. **Emergency Blank Button:** A dedicated prominent button in the web UI immediately shuts down LED modulation and halts the drive motor.

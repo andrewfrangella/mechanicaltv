@@ -123,6 +123,7 @@ if [[ ! -f /etc/mechanical-tv/environment ]]; then
     'MTV_HDMI_DEVICE=/dev/video0' '# MTV_DEFAULT_SOURCE=hdmi starts capture at boot (web default: pattern; local console: hdmi when the device exists)' \
     '# MTV_HDMI_BRIDGE=auto|csi|usb  MTV_HDMI_FORMAT=auto|uyvy422|mjpeg|none  MTV_HDMI_EDID=auto|none|/path  MTV_HDMI_FIT=fit|crop' \
     '# MTV_HDMI_BACKEND=auto|v4l2|ffmpeg|opencv  (auto: in-process V4L2 reader for the CSI bridge, FFmpeg otherwise)' \
+    '# MTV_RAMP_RATE=2.0  FPS gained per second while spinning up; lower it (e.g. 0.5) if a heavy disk stalls the motor' \
     > /etc/mechanical-tv/environment
   chmod 0644 /etc/mechanical-tv/environment
 fi

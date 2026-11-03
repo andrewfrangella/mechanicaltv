@@ -102,6 +102,9 @@ class RealtimeController:
         if self._sync_thread and self._sync_thread.is_alive():
             self._sync_thread.join(timeout=1.5)
         self._sync_thread = None
+        with self._lock:
+            if not self._running:
+                self.state = "idle"  # the supervisor may have written 'ramping' while the motor wound down
 
     def emergency_blank(self) -> None:
         """Immediately cut power to LED and stop motor. Also leaves free-run, which would relight the LED."""
@@ -231,6 +234,8 @@ class RealtimeController:
         while self._running:
             time.sleep(0.1)
             with self._lock:
+                if not self._running:
+                    break  # stop() ran during the sleep: leave its 'idle' state alone
                 # If mock sensor, update simulated speed to match motor ramp
                 if isinstance(self.sensor, MockOptoSensor):
                     self.sensor.set_simulated_fps(self.motor.current_fps)

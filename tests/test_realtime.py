@@ -343,3 +343,50 @@ class TestRealtimeAPIEndpoints(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RampRateSettingTests(unittest.TestCase):
+    """MTV_RAMP_RATE sets the spin-up acceleration (a heavy disk needs a gentler ramp)."""
+
+    def _with_env(self, value):
+        import os
+        from unittest import mock
+        env = {"MTV_RAMP_RATE": value} if value is not None else {}
+        with mock.patch.dict(os.environ, env, clear=False):
+            if value is None:
+                os.environ.pop("MTV_RAMP_RATE", None)
+            return MotorController(driver=MockMotorDriver(port=1)).ramp_rate_fps
+
+    def test_default_when_unset_or_malformed(self):
+        from mechanical_tv.hardware.motor import DEFAULT_RAMP_RATE
+        self.assertEqual(self._with_env(None), DEFAULT_RAMP_RATE)
+        self.assertEqual(self._with_env(""), DEFAULT_RAMP_RATE)
+        self.assertEqual(self._with_env("fast"), DEFAULT_RAMP_RATE)
+        self.assertEqual(self._with_env("nan"), DEFAULT_RAMP_RATE)
+
+    def test_value_and_clamping(self):
+        from mechanical_tv.hardware.motor import MAX_RAMP_RATE, MIN_RAMP_RATE
+        self.assertEqual(self._with_env("0.5"), 0.5)
+        self.assertEqual(self._with_env(" 1.25 "), 1.25)
+        self.assertEqual(self._with_env("0"), MIN_RAMP_RATE)
+        self.assertEqual(self._with_env("-3"), MIN_RAMP_RATE)
+        self.assertEqual(self._with_env("1e9"), MAX_RAMP_RATE)
+
+    def test_explicit_argument_wins_and_is_reported(self):
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"MTV_RAMP_RATE": "0.5"}):
+            ctrl = MotorController(driver=MockMotorDriver(port=1), ramp_rate_fps=7.0)
+        self.assertEqual(ctrl.ramp_rate_fps, 7.0)
+        self.assertEqual(ctrl.get_telemetry()["ramp_rate_fps"], 7.0)
+
+    def test_slow_ramp_slows_spin_up(self):
+        slow = MotorController(driver=MockMotorDriver(port=1), target_fps=10.0, ramp_rate_fps=0.5)
+        fast = MotorController(driver=MockMotorDriver(port=1), target_fps=10.0, ramp_rate_fps=20.0)
+        slow.start(); fast.start()
+        time.sleep(0.4)
+        try:
+            self.assertLess(slow.current_fps, fast.current_fps)
+            self.assertLess(slow.current_fps, 2.0)
+        finally:
+            slow.stop(); fast.stop()

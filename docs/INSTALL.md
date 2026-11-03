@@ -103,6 +103,7 @@ Plug it into a USB 3.0 port. No overlay or EDID is needed; the service opens it 
 | `MTV_HDMI_FORMAT` | `auto` | FFmpeg `-input_format`: `uyvy422` for CSI, `mjpeg` for USB, `none` to let FFmpeg negotiate |
 | `MTV_HDMI_EDID` | `auto` | EDID hex file for CSI bridges: the packaged 1080p30, `none` to skip, or an absolute path such as `/opt/mechanical-tv/current/mechanical_tv/edid/720p60.txt` |
 | `MTV_HDMI_FIT` | `fit` | `fit` letterboxes the source; `crop` fills 32 × 25 from the centre |
+| `MTV_RAMP_RATE` | `2.0` | Acceleration in FPS per second (from 0.5 FPS to 10 FPS takes about 5 s at the default). Lower it, for example to `0.5`, when a heavy disk stalls the stepper during spin-up; the PLL trim slew limit scales with it. Clamped to 0.1 to 50 |
 | `MTV_HDMI_BACKEND` | `auto` | `auto` uses the in-process V4L2 reader (needs python3-numpy) whenever the input format is `uyvy422` and falls back to FFmpeg with a journal line if it cannot open the device; `v4l2` insists on it and reports failures instead; `ffmpeg` forces FFmpeg; `opencv` only if python3-opencv is installed |
 
 The `doctor` command prints the detected adapter type, input format, EDID path and default source. The data directory is readable by root only, and the service's environment file is not read automatically, so run:
