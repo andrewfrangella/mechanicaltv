@@ -1,100 +1,79 @@
-# Validation and acceptance
+# Validation
 
-## Automated checks
-
-Run from the repository root:
+## Automated tests
 
 ```bash
-python3 -m unittest discover -s tests -v
-bash -n install.sh packaging/make-test-clip.sh
-node --check mechanical_tv/static/app.js
-git diff --check
+cmake -S . -B build -G Ninja -DMTV_WERROR=ON && cmake --build build
+QT_QPA_PLATFORM=offscreen ./build/mtv_tests        # doctest; --help lists filters
+bash -n install.sh packaging/make-test-clip.sh && sh -n packaging/mechanical-tv-hw-setup
+python3 packaging/make-edid.py --check
 ```
 
-Python tests use temporary data and loopback sockets. FFmpeg and FFprobe are required for integration tests; without them the conversion tests are skipped, not passed. A sandbox that disallows local sockets must grant access before the integration suite can run.
+`install.sh` runs the suite on the Pi before installing. GitHub Actions builds with warnings as
+errors and runs it on Ubuntu.
 
-Coverage includes:
+| File | Covers |
+| --- | --- |
+| `tests/test_pipeline.cpp` | Gamma LUT (round-half-even like Python), all ten patterns, spiral map and its permutation, phase and flips, single brightness application, reconstruction, calibration clamps, source switching, HDMI without signal is black, library clips loop |
+| `tests/test_capture.cpp` | FFmpeg argv and filter, frame split, adapter detection from sysfs, format/EDID per adapter, shipped EDID checksums and 1080p30 timing. With a fake bridge and reader: EDID once, timings per open, frames flow, buffers requeued, stop closes, no signal then recovery, EDID failure message, missing device, stop during a slow open, short frame skipped, explicit `v4l2` vs `auto` fallback, USB never native, dead FFmpeg reported with its stderr, stalled stream reopened. Also placement, sampler luma levels and crop, odd widths, and a frozen source turning black within 1 s |
+| `tests/test_v4l2_reader.cpp` (Linux) | V4L2 reader against a fake driver: setup and teardown order, bad and short buffers requeued, sequence gaps counted, source-change event, non-UYVY refused |
+| `tests/test_hardware.cpp` | A realistic spin-up with a blocking LED output at three notch phases (the audit's false-stall case), step accounting at past instants, reversed-direction step magnitudes, microstep check ignoring bounces and being cancellable, motor driver errors reported. Also: ramp setting, S-curve (no speed steps, no overshoot, jerk limit), mock motor, revolution tracker (debounce, lock hysteresis, silence, steps ratio), LED bit builder (pulse widths, minimum pulse, chunked equals whole, late start). In simulation: lock, LED stream equals the pipeline's, stop, LED dark below 1 FPS, free-run pacing and no double clocking, emergency blank, speed limits, stall stop, microstep mismatch while spinning, the microstep self-test, live preview when idle |
+| `tests/test_engine.cpp` | Subprocess cancel, crash failsafe writes the PWM off, library CRUD, id validation, interrupted-job recovery, real FFmpeg conversion (20 frames from a 2 s clip) and a corrupt file, Studio import and worker, health fields, environment file, log file, listener and rotation |
+| `tests/test_console.cpp` | Options and env file, choices, default source, data-directory fallback, `--check` fields; the real window off-screen: pills, HUD, slider labels, free-run, start to LOCKED, emergency blank, calibration, source change, error counter and debug window, emergency blank acting at once during a microstep check; SIGTERM to the real binary shuts it down cleanly |
 
-- Password authentication, session logout, unauthenticated rejection, cross-origin POST rejection, and invalid numeric commands.
-- Upload through HTTP, actual FFmpeg grayscale conversion, expected frame count/data shape, and authenticated MP4 byte-range responses.
-- Play, pause, seek, loop, end-of-clip blanking, deletion protection and removal.
-- Monotonic-clock simulation with deterministic test time.
-- Recovery of interrupted uploads; invalid IDs and damaged prepared data.
-- Corrupt video failure without stopping the conversion worker.
-- Free-run output: frames and LED pulses without index pulses, pacing at the target speed, no double clocking when pulses arrive, emergency blank and close leaving free-run, the 24 FPS ceiling, and the `free_run` API action (`tests/test_free_run.py`).
-- Local console: PGM framing, default-source resolution, the `--check` report, data-directory fallback, file import into the library, the logging module (file, queue, `print()` capture, tracebacks) and, when a display is available, the real Tk window: refresh loop, free-run through the action queue, zoomed preview size, debug window and error counter (`tests/test_local_app.py`; the window test is skipped without `DISPLAY`).
+Recorded 2026-11-03:
 
-No test drives a motor or LED. No hardware or real-time behavior is verified by these tests.
+- **macOS (Apple clang 21, Qt 6.11):** 57 test cases pass. The suite is also clean under
+  ThreadSanitizer, AddressSanitizer and UBSan.
+- **Debian Trixie arm64 (GCC 14.2, Qt 6.8, `-Werror`), in a container:** 60 test cases pass, the
+  extra three being the Linux-only V4L2 reader tests.
+- **Bookworm (GCC 12) and Ubuntu 24.04 (GCC 13):** the independent audit built and tested on both. The installer was run end to end in the same
+container with stubbed systemd and boot files, and a second run was idempotent.
 
-## Local validation record
+**No test drives a motor, sensor or LED.** These checks prove the logic, not the timing on the Pi.
 
-Development machine: Linux ARM64, Python 3.14.7, FFmpeg 9.0.1.
+## On the Pi: bring-up checklist (not yet performed)
 
-Recorded during the initial build:
+### Install
 
-- **Passed:** seven Python unit/integration tests, including actual FFmpeg conversion and HTTP playback.
-- **Passed:** Bash syntax, JavaScript syntax, and Git whitespace checks.
-- **Passed:** headless Chromium browser smoke test: sign in, upload, preparation, select, play, pause, reload with persistent session/player state, stop, health page, sign out.
-- **Passed:** 1280-pixel desktop and 390-pixel mobile layouts; mobile has no horizontal overflow; no JavaScript page errors in the smoke test.
-- **Inspected:** screenshots of both layouts with a generated test pattern. A desktop capture is included in `docs/images/player-desktop.png`.
+- [ ] Fresh Raspberry Pi OS 64-bit with desktop. `sudo bash install.sh` builds, tests and installs;
+  after the reboot the console opens full screen.
+- [ ] `mechanical-tv --check` shows `hardware_pwm: true`, `gpiochip: true`, the rtprio limit 80,
+  `isolated_cpus: "3"`, and for SPI `spidev_bufsiz: 65536`.
+- [ ] The debug log at start has no `SCHED_FIFO … refused` warning.
 
-GitHub Actions separately targets Python 3.11 on Ubuntu and its available FFmpeg. A workflow being present is not evidence that a hosted run has passed.
+### Motor ([DIAGNOSIS.md](DIAGNOSIS.md) section 1)
 
-Pi OS installer, systemd hardening/resource limits, boot recovery, thermal behavior and sustained playback require validation on the actual Pi. The development environment is not Raspberry Pi OS.
+- [ ] MS1-MS3 at 3.3 V, Vref measured and set for 0.7-0.8 A, heatsink fitted, VMOT ≥ 12 V under load.
+- [ ] Check microstepping passes (3,200 steps per revolution).
+- [ ] Spin up to 10 FPS with the disk fitted: no stall, motor pill reaches LOCKED within about 8 s.
+- [ ] 30-minute run at 10 FPS: no STALLED, driver temperature acceptable.
 
-## Browser acceptance
+### Sync and picture
 
-An optional repeatable smoke test is provided in `tests/browser_smoke.cjs`. Install Playwright as a development-only dependency outside the repository, then point `PLAYWRIGHT_MODULE` at it and `CHROMIUM_PATH` at an installed Chromium executable:
+- [ ] Console closed, disk turned by hand: `gpiomon -c gpiochip0 -e rising -b pull-down 4` (Trixie;
+  Bookworm: `gpiomon -r gpiochip0 4`) prints one line per revolution.
+- [ ] With the motor at 10 FPS, the debug log's `index:` lines show jitter well under 0.1 ms and
+  3200 steps/rev.
+- [ ] OPTO JITTER in the HUD stays well under 1 ms while LOCKED; lock holds for minutes.
+- [ ] Aperture grid stands still on the disk; phase offset centres it; Sweeping Column runs in order.
+- [ ] GPIO output: `cyclictest -m -a 3 -t1 -p90 -i125 -D 5m` with the console open and the motor
+  stopped, max under 100 µs.
+- [ ] `kill <pid>` of a spinning console stops the motor and blanks the LED (log: `signal 15`).
+- [ ] SPI output: scope GPIO 10 shows 0.5 µs bits, the frame starts within a pixel of the notch
+  every revolution, and MOSI is low between revolutions.
 
-```bash
-npm install --prefix /tmp/mechanical-tv-browser-check playwright
-PLAYWRIGHT_MODULE=/tmp/mechanical-tv-browser-check/node_modules/playwright CHROMIUM_PATH=/usr/bin/chromium node tests/browser_smoke.cjs
-```
+### HDMI
 
-The script creates temporary credentials/media, starts its own localhost server, and prints the screenshot directory. It stops the server afterward. Neither npm nor Playwright is needed on the appliance. Manual checks below remain useful for the actual Pi and intended browsers.
+- [ ] `dmesg | grep tc358743` finds the bridge; selecting Live HDMI logs `EDID … loaded`; the Mac
+  lists MechanicalTV at 1920 × 1080 30 Hz.
+- [ ] Status `CSI · v4l2 · 1920x1080 @ 30 FPS · LIVE`; SMPTE bars from the Mac match the disk.
+- [ ] Unplug HDMI: NO SIGNAL and a black disk within 5 s; replug: recovers without restarting.
+- [ ] `v4l2-ctl --stream-mmap=4 --stream-count=600 --stream-to=/dev/null` reports about 30 fps
+  with no errors.
 
-- [ ] Login and wrong-password message.
-- [ ] Desktop and narrow phone layout.
-- [ ] Upload a generated five-second clip.
-- [ ] Watch queued/preparing/ready transitions.
-- [ ] Select, compare source and TV image, play, pause, seek, loop and stop.
-- [ ] Delete after stopping and confirm library removal.
-- [ ] Refresh/reopen while playing and verify state comes from the Pi.
-- [ ] Sign out and verify protected media/API access stops.
-- [ ] Inspect health and download diagnostics.
-- [ ] Confirm browser console has no application errors.
+### Library and shutdown
 
-## Pi acceptance — not yet performed
-
-- [ ] Install on a fresh supported 64-bit Pi OS image.
-- [ ] Confirm source preview H.264 playback in intended client browsers.
-- [ ] Reboot and open the interface without desktop login; verify idle state.
-- [ ] With `MTV_DEFAULT_SOURCE=hdmi`, reboot with networking disconnected and confirm capture starts without a browser.
-- [ ] Run a 30-minute loop, monitor memory, temperature, service stability, and browser behavior.
-- [ ] Upload/convert while idle; verify queue deferral during playback.
-- [ ] Interrupt an upload, restart during preparation, and verify recovery.
-- [ ] Confirm configured disk reserve rejects oversized work without filling storage.
-- [ ] Exercise service failure/restart and inspect logs.
-- [ ] Test update, backup, password reset and recovery procedures.
-- [ ] Shut down through the OS before disconnecting power.
-
-## Hardware acceptance — future stage
-
-Requires actual motor speed/index measurements, LED current and pulse timing measurements, calibration images, loaded-disk tests, loss-of-sync behavior and independently verified stop behavior. Browser simulation must never substitute for these checks.
-
-## HDMI acceptance — TC358743 CSI adapter, pending on hardware
-
-- [ ] `dmesg | grep tc358743` reports the bridge and `v4l2-ctl --list-devices` shows unicam on `/dev/video0` after reboot.
-- [ ] Selecting Live HDMI logs `HDMI capture: EDID /opt/mechanical-tv/releases/<stamp>/mechanical_tv/edid/1080p30.txt loaded`; the MacBook lists a display named MechanicalTV at 1920 × 1080, 30 Hz within a few seconds.
-- [ ] With `MTV_DEFAULT_SOURCE=hdmi`, the same happens at boot with no browser open; without it, the input is the SMPTE pattern after a restart.
-- [ ] Status line reads `CSI · 1920x1080 @ 30 FPS · LIVE`; SMPTE bars from the Mac match bars on the disk; test `MTV_HDMI_FIT=crop`.
-- [ ] Unplug HDMI: within 5 s the status reads NO SIGNAL and the disk is black; replug: capture recovers without a restart.
-- [ ] Put the Mac to sleep and change its resolution: the service reopens the device each time.
-- [ ] Boot with no source attached: service healthy, no-signal reason shown; attach later and verify recovery.
-- [ ] 30-minute soak: FFmpeg CPU within `CPUQuota=150%`, memory under `MemoryMax=768M`, temperature, latency.
-- [ ] USB UVC dongle still captures as MJPEG with `MTV_HDMI_BRIDGE` unset.
-- [ ] Flip the input selector repeatedly while a source is attached: no orphaned `ffmpeg` in `ps`, the journal shows clean reopen cycles.
-
-Automated coverage in `tests/test_capture.py`: adapter detection from sysfs, FFmpeg argv per adapter, CSI preparation order with a fake `v4l2-ctl` (EDID once, timings per open, no FFmpeg before lock), dead FFmpeg and stalled stream detection (frame cleared, child reaped, reopen), stop() during a slow open leaving no orphaned process, worker recovery from an unexpected exception, black output in HDMI mode without signal, `MTV_DEFAULT_SOURCE=hdmi` at startup, `doctor --env-file`, and EDID structure and checksums. `tests/test_v4l2.py` covers the in-process reader: struct sizes and ioctl numbers against values compiled from `<linux/videodev2.h>`, letterbox placement, UYVY sampling of a synthetic 1080p frame (colour, letterbox rows, crop mode, raw luma on the disk), and the worker with a fake reader (frames flow, every buffer is requeued, stop() closes the device, explicit `v4l2` reports failures, `auto` falls back to FFmpeg, USB dongles never use it).
-
-No actual Pi, capture adapter, HAT or physical output validation has been performed for this change.
+- [ ] Add a clip made by `packaging/make-test-clip.sh`; it converts to READY while the motor is
+  stopped; Show on disk plays it.
+- [ ] Ctrl+Q stops the motor and blanks the LED before the window closes.
