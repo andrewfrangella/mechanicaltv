@@ -61,7 +61,7 @@ cd mechanicaltv
 sudo bash install.sh
 ```
 
-Run it from the desktop account that will operate the TV. The installer installs hardware packages (`i2c-tools`, `python3-smbus`, `python3-tk`, `v4l-utils`), adds that account to the `i2c`, `gpio`, `video` and `spi` groups, enables I2C, and installs the console as a desktop application that opens full screen with the desktop (menu: Sound & Video > Mechanical TV). Log out and in once after the first install so the group memberships apply.
+Run it from the desktop account that will operate the TV. The installer installs hardware packages (`i2c-tools`, `python3-smbus`, `python3-tk`, `v4l-utils`), adds that account to the `i2c`, `gpio`, `video` and `spi` groups, enables I2C, and installs the console as a desktop application that opens full screen with the desktop (desktop icon, and menu: Sound & Video > Mechanical TV). Log out and in once after the first install so the group memberships apply.
 
 For the web interface instead, run `sudo MTV_UI=web bash install.sh` and open `http://<Pi-IP-address>:8080` or `http://<pi-hostname>.local:8080`.
 

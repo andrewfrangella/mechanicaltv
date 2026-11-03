@@ -23,8 +23,8 @@ while the preview is live.
 
 ## Starting it
 
-`sudo bash install.sh` (default `MTV_UI=local`) installs a menu entry (Sound & Video > Mechanical TV)
-and an autostart entry for the account that ran sudo, so the console opens full screen with the
+`sudo bash install.sh` (default `MTV_UI=local`) installs a desktop icon, a menu entry (Sound & Video >
+Mechanical TV) and an autostart entry for the account that ran sudo, so the console opens full screen with the
 desktop. By hand, from `/opt/mechanical-tv/current` or a clone:
 
 ```bash

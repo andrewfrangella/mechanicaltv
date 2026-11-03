@@ -168,7 +168,13 @@ systemctl daemon-reload
 if [[ "$ui_mode" == local ]]; then
   systemctl disable --now mechanical-tv.service 2>/dev/null || true
   install -m 0644 "$project_dir/packaging/mechanical-tv.desktop" /usr/share/applications/mechanical-tv.desktop
+  install -D -m 0644 "$project_dir/packaging/mechanical-tv.png" /usr/share/icons/hicolor/256x256/apps/mechanical-tv.png
+  gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
   desktop_home="$(getent passwd "$desktop_user" | cut -d: -f6)"
+  # A double-clickable icon on the desktop (the file must be executable for the file manager to launch it).
+  if [[ -d "$desktop_home/Desktop" ]]; then
+    install -m 0755 -o "$desktop_user" -g "$desktop_user" "$project_dir/packaging/mechanical-tv.desktop" "$desktop_home/Desktop/mechanical-tv.desktop"
+  fi
   if [[ "${MTV_AUTOSTART:-1}" == 1 && -d "$desktop_home" ]]; then
     install -d -m 0755 -o "$desktop_user" -g "$desktop_user" "$desktop_home/.config" "$desktop_home/.config/autostart"
     install -m 0644 -o "$desktop_user" -g "$desktop_user" "$project_dir/packaging/mechanical-tv.desktop" "$desktop_home/.config/autostart/mechanical-tv.desktop"
@@ -190,7 +196,7 @@ if [[ "$ui_mode" == local ]]; then
     exit 0
   fi
   echo "Mechanical TV console installed (motor driver: $motor_driver)."
-  echo "It opens full screen with the desktop. Start it now from the menu (Sound & Video > Mechanical TV) or with:"
+  echo "It opens full screen with the desktop. Start it now from the desktop icon, the menu (Sound & Video > Mechanical TV) or with:"
   echo "  python3 -m mechanical_tv.app --env-file /etc/mechanical-tv/environment"
   echo "Run from /opt/mechanical-tv/current. F11 full screen, F12 debug log, Ctrl+Q quit. Log file: ~/.local/share/mechanical-tv/logs/"
   echo "Log out and back in once so the new hardware group memberships (gpio, i2c, video, spi) apply."
@@ -198,11 +204,12 @@ if [[ "$ui_mode" == local ]]; then
   exit 0
 fi
 
-# Remove a local-mode autostart entry so the web service alone owns the hardware.
+# Remove local-mode autostart and desktop launchers so the web service alone owns the hardware.
 if [[ -n "$desktop_user" && "$desktop_user" != root ]]; then
   desktop_home="$(getent passwd "$desktop_user" | cut -d: -f6)"
-  rm -f "$desktop_home/.config/autostart/mechanical-tv.desktop"
+  rm -f "$desktop_home/.config/autostart/mechanical-tv.desktop" "$desktop_home/Desktop/mechanical-tv.desktop"
 fi
+rm -f /usr/share/applications/mechanical-tv.desktop
 
 if [[ "$reboot_needed" == true ]]; then
   systemctl enable mechanical-tv.service
