@@ -8,3 +8,5 @@ playwright-report/
 .dmux-hooks/
 .DS_Store
 *.tar.gz
+build/
+build-*/

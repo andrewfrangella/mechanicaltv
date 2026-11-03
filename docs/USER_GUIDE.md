@@ -1,94 +1,75 @@
-> The Realtime tab (live HDMI, test patterns, motor, calibration) is the primary flow. This guide also covers the media library player. Adapter setup: [INSTALL.md](INSTALL.md#hdmi-input).
-
 # User guide
 
-## Everyday flow
+## Everyday use
 
-With the local console (default install) the window opens full screen when the Pi's desktop starts; see [LOCAL_APP.md](LOCAL_APP.md) for its layout, keys, the free-run output and the debug log. The controls below have the same names in both interfaces. With the web interface:
+1. Power on the Pi. The console opens full screen with the desktop.
+2. Connect the HDMI source (the MacBook). Within a few seconds the Mac lists a display named
+   MechanicalTV and the status line reads `LIVE`.
+3. Press **Spin up motor** (or Space). The motor eases up to the target speed over about 5 s; the
+   motor pill goes RAMPING, RUNNING, then LOCKED. Once locked, the picture holds still.
+4. Press **Stop motor** when done. Quit with Ctrl+Q, then shut down the Pi from the desktop menu
+   before removing power. Logging out or shutting down with the console open also stops the motor
+   and blanks the LED.
 
-1. Power on the Pi and allow it to boot.
-2. Join the same network as the Pi.
-3. Open the app's local address and sign in.
-4. Open Library, choose a clip and framing, then Upload & prepare.
-5. Wait for READY. Select the video.
-6. Compare the source proxy with the prepared TV image. Press Play.
-7. Stop when finished. Shut down the Pi through the OS before removing power.
+## First-time calibration
 
-Everything stays on the Pi. After an upload finishes, the laptop is no longer the media source. No internet or GitHub connection is required for playback.
+1. **Check microstepping** once after wiring the motor driver (see [LOCAL_APP.md](LOCAL_APP.md)).
+2. Select **Test Pattern: Aperture Grid & Crosshair** and spin up.
+3. Move **Phase offset** until the frame is centred in the viewing window. Twenty-five pixels is one
+   hole; the label shows degrees too.
+4. If the picture is mirrored, tick **Invert horizontal** and/or **Invert vertical**.
+5. Use **SMPTE Grayscale Bars** to set **Gamma** and **Contrast** so all eight bars are distinct, and
+   **LED brightness** to taste.
+6. **Sweeping Column** and **Sweeping Row** confirm the scan order; **Rotating Phase Sync Bar** shows
+   any wobble.
 
-## Live HDMI input
+Calibration is not saved between runs yet. Note the values for next time.
 
-Select **Live HDMI Video (capture adapter)** in the Video Input selector on the Realtime tab. The selection is not remembered across a service restart or reboot (the input returns to the SMPTE pattern) unless the operator sets `MTV_DEFAULT_SOURCE=hdmi`; see INSTALL.md. The status line next to the selector (below it on narrow screens) reports the adapter type (CSI or USB), the input resolution and frame rate while frames flow as `LIVE`, or as `BLACK PICTURE (peak n/255)` when frames arrive but every pixel is black (the source is sending a blank second display: wake it or move a window onto that display); `WAITING FOR FRAMES` while the device is open but no frame has arrived in the last 5 s; or `NO SIGNAL`, with the reason in the Source Video panel (device missing, no HDMI source detected, FFmpeg exit message). The Source Video panel shows the same 32 × 25 frame that is sent to the disk; there is no full-resolution browser preview of live HDMI. When frames stop, the last frame is held for at most 5 s and then the disk shows black, never a test pattern, while the service reopens the device every second. The selector follows the server, so a reload or another browser shows the active input.
+## Video input
 
-## Motor, speed and free-run output
-
-**Spin Up Motor** ramps the disk to the target speed; **Stop Motor** releases it; **Emergency Blank** cuts the LED, stops the motor and turns free-run off. Speed runs from 1 to 24 FPS (60 to 1440 RPM). Above about 20 FPS a NEMA 17 may stall on a printed disk and each LED pixel slot shrinks below 55 µs; the ceiling is there to try, not a guarantee.
-
-**Free-run output** clocks the LED and preview from an internal timer at the target speed instead of the disk's index pulse. The LED fires without a spinning disk and the stall interlock is bypassed, so use it only for bench tests of the video path and never with a stopped disk under the LED. The sync pill reads `FREE-RUN` while it is on.
-
-## Player
-
-The source panel shows a silent H.264 proxy, scaled for efficient browser playback. It is not an untouched full-resolution original. The TV panel shows the prepared grayscale frame, multiplied by the selected simulated brightness. At most about seven status samples per second are sent to this browser; the 10 fps software timeline can advance between samples. The preview is therefore not a physical timing instrument.
-
-| Control | Behavior |
+| Choice | What it shows |
 | --- | --- |
-| Select | Loads a ready clip, resets position, does not start |
-| Play | Starts or resumes the shared Pi-side timeline |
-| Pause | Holds the current image and position |
-| Stop | Resets position and blanks the simulated TV panel |
-| Seek | Changes the position within the selected clip |
-| Loop | Repeats at the end; when off, the player stops and blanks |
-| Brightness | Scales simulated brightness from 0–100%; does not change an LED |
+| Live HDMI Video | The HDMI adapter's picture, letterboxed (`MTV_HDMI_FIT=crop` fills instead). No signal shows black, never a stale frame |
+| Test patterns | SMPTE bars, horizontal and vertical ramps, aperture grid, rotating bar, 1 Hz pulse, checkerboard, sweeping column, sweeping row, moving diagonal |
+| Selected Library Clip | The clip chosen with Show on disk, looping at 10 frames per second |
 
-Closing the tab, signing out, or disconnecting Wi-Fi does not stop playback. Reconnecting reads the current server timeline. Restarting the service or Pi always returns to idle with no selection. All signed-in clients can control the same player; an operator lease is planned but not yet implemented.
+The HDMI status line reads `LIVE`, `BLACK PICTURE (peak n/255)`, `WAITING FOR FRAMES` or
+`NO SIGNAL`, with the reason underneath. Unplugging or sleeping the source blanks the disk within
+1 s. The app reopens the device by itself when the source returns.
 
-In a future physical display, freezing an image may require continuing disk rotation. No physical pause/stop behavior is implemented here.
+## Motor and speed
 
-## Library and uploads
+Speed runs from 1 to 24 FPS (60 to 1,440 RPM). Above about 20 FPS a NEMA 17 may stall with a printed
+disk, and each pixel slot shrinks to 62.5 µs at 20 FPS and 52 µs at 24 FPS. Change speed while running and the motor eases to
+the new speed.
 
-- Start with a short MP4/H.264 video. Audio is ignored.
-- Maximum upload: 256 MiB. Maximum duration: 10 minutes.
-- Maximum source dimensions: 1920 on either axis. Unknown/invalid duration is rejected.
-- Fit preserves the entire image and adds black padding. Crop fills 32:25 from the center.
-- One upload at a time, up to three unfinished jobs. One conversion runs at a time.
-- An upload progress bar measures transfer only. Processing states do not estimate conversion percentage.
-- New conversions wait while the player is playing. An already-running conversion is allowed to finish.
-- Cancel applies during upload only; it cannot stop a preparation job once the Pi has accepted the file.
+**Emergency blank** turns off the LED, stops the motor and leaves free-run. Stop releases the coils,
+so the disk coasts down.
 
-States: **UPLOADING → QUEUED → PREPARING → READY**, or **FAILED** with an explanation. Originals are stored under generated IDs, not user-controlled paths. Untrusted names are rendered as text.
+## Media library
 
-Delete removes the original, preview, prepared frames, and metadata. Stop playback before deleting the selected clip. Wait for active conversion to finish before deleting that job. Changing fit/crop currently requires uploading again; in-place reprocessing is planned.
-
-After a restart, queued jobs resume. Jobs interrupted during upload or preparation become failed rather than pretending to be ready. Delete and upload them again. Files marked ready are made available only after complete conversion outputs are written.
-
-## System
-
-The health page reports version, mode, worker liveness, dependency availability, storage, uptime, and a temperature reading when the OS exposes one. Temperature is the first available Linux thermal-zone reading, not guaranteed to identify the CPU on every development computer.
-
-Download diagnostics returns these basic values as JSON. It does not include passwords, sessions, video contents, file names, or logs. Actual RPM, sync status, output-buffer underruns, and Pi throttling flags are not measured in this version.
+- **Add video file…** copies an MP4, MOV, MKV, WebM or AVI file into the library and queues its
+  conversion to 32 × 25 grayscale at 10 fps. Audio is ignored.
+- Limits are 256 MiB, 10 minutes and 1920 pixels on either side, at least 512 MiB of free space
+  left, and at most three unfinished jobs.
+- Conversion runs only while the motor is stopped, so it never competes with the disk.
+- States are QUEUED, PREPARING, READY, or FAILED with the reason. A job interrupted by quitting is
+  marked failed; delete it and add it again.
+- **Crop to fill** before adding a file fills the 32:25 frame from the centre instead of
+  letterboxing.
+- **Show on disk** selects a READY clip as the input. **Delete** removes it after confirmation.
 
 ## Troubleshooting
 
 | Symptom | Check |
 | --- | --- |
-| Site unreachable | Confirm Wi-Fi/network, IP, port 8080, and service status over SSH |
-| `.local` name fails | Use the Pi's IP address; mDNS varies by network/client |
-| Login rejected | Use the application password, not Wi-Fi/OS credentials; reset using INSTALL.md |
-| Too many login attempts | Wait one minute; rate limit is shared across clients |
-| Preparation remains queued | Stop playback; wait for the preceding conversion |
-| Preparation failed | Try a short MP4/H.264 clip within limits; inspect service logs |
-| Upload rejected for space | Remove unwanted media; leave room for original, proxy, frames, and reserve |
-| Page loses connection | Pi may still be playing. Reconnect; do not assume the display stopped |
-| Source preview does not play | Try a browser with H.264 support; prepared TV preview is separate |
-| Picture looks too small | Try Crop on a new upload; low resolution is intentional |
-| HDMI status says device not found | USB dongle unplugged, or `dtoverlay=tc358743` missing for a CSI adapter; see INSTALL.md |
-| HDMI status says no HDMI signal on the CSI bridge | The source must show a second display named MechanicalTV. Check the ribbon is in CAMERA, the overlay is loaded, the EDID line appeared in the journal, and follow "If the Mac shows no display" in INSTALL.md (`v4l2-ctl --log-status`) |
-| HDMI status stays at WAITING FOR FRAMES | Timings locked but FFmpeg delivers nothing; read `journalctl -u mechanical-tv -f` for `ffmpeg exited` lines and check `MTV_HDMI_FORMAT` |
-| Input is back on the test pattern after a restart | Expected: the selection is not persisted. Re-select Live HDMI or set `MTV_DEFAULT_SOURCE=hdmi` |
-| HDMI status says LIVE but the picture is black | Frames arrive and every pixel is black: the device feeding the adapter shows a blank second display. Wake it, un-blank or extend the display, put a window on it. The console and web page name this state `BLACK PICTURE` |
-| LED never lights, disk not fitted or sensor unwired | Expected: frames are clocked by the index pulse. Enable **Free-run output** for a bench test |
-| Errors flashed by in the console | Press F12 for the debug log, or read `~/.local/share/mechanical-tv/logs/mechanical-tv.log` |
-| HDMI status says ffmpeg exited | Read the quoted FFmpeg error; wrong `MTV_HDMI_FORMAT` is the usual cause (`uyvy422` for CSI, `mjpeg` for USB) |
-| HDMI goes black for a moment | Frames stopped for 5 s (source slept or changed mode); the service reopens the device by itself |
-
-RGB output and crop-position adjustment are roadmap features. Live HDMI, calibration, gamma, contrast and motor control are on the Realtime tab.
+| Motor buzzes and does not turn at start | Microstep pins (Check microstepping), Vref, heat, supply voltage, rim rubbing: [DIAGNOSIS.md](DIAGNOSIS.md) section 1 |
+| Motor pill reads STALLED | The footer names the reason (no pulses, or wrong steps per revolution) |
+| Sync never locks | Measured speed must be within 3 % of the target; read INDEX SENSOR (backend and pulses) and OPTO JITTER; the debug log's `index:` line every 5 s gives the kernel-measured period, jitter and steps per revolution |
+| LED never lights, disk not fitted | Expected: frames are clocked by the index pulse. Use Free-run output for a bench test |
+| SAFETY WATCHDOG reads TRIPPED | No index pulse for 350 ms: the disk stopped or the sensor lost the notch |
+| HDMI says device not found | `dtoverlay=tc358743` missing, or the ribbon in the DISPLAY socket |
+| HDMI says no signal | The source must show a second display named MechanicalTV; see INSTALL.md "If the Mac shows no display" |
+| HDMI is LIVE but black | The source sends a black picture: wake it or move a window onto that display |
+| Hardware note in the footer, SIMULATION pill | Real hardware failed at start; the debug log has the reason |
+| Errors flashed by | F12, or `~/.local/share/mechanical-tv/logs/mechanical-tv.log` |

@@ -1,0 +1,12 @@
+[Unit]
+Description=Mechanical TV hardware preparation (PWM export, CPU governor) and shutdown failsafe (motor and LED off)
+After=systemd-modules-load.service systemd-udevd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/mechanical-tv/mechanical-tv-hw-setup start
+ExecStop=/opt/mechanical-tv/mechanical-tv-hw-setup stop
+
+[Install]
+WantedBy=multi-user.target

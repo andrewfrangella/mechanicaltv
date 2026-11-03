@@ -1,4 +1,18 @@
 #!/usr/bin/env bash
+# Mechanical TV installer for Raspberry Pi OS (64-bit, Bookworm or Trixie) on a Raspberry Pi 4.
+#
+# Builds the C++ desktop application on the Pi, installs it under /opt/mechanical-tv, adds a desktop
+# icon, a menu entry (Sound & Video > Mechanical TV) and an autostart entry for the account that ran
+# sudo, and applies the boot and realtime settings the motor, index sensor and LED timing need.
+#
+#   sudo bash install.sh
+#
+# Choices (environment variables):
+#   MTV_MOTOR_DRIVER=a4988|hat   A4988-style STEP/DIR driver on hardware PWM (default) or the Adafruit Motor HAT
+#   MTV_LED_OUTPUT=gpio|spi      LED from GPIO 21 bit-banged (default, original wiring) or SPI0 MOSI / GPIO 10 by DMA (recommended)
+#   MTV_ISOLATE_CPU=1|0          reserve CPU 3 for the realtime LED thread (default 1)
+#   MTV_AUTOSTART=1|0            open the console when the desktop starts (default 1)
+#   MTV_RUN_TESTS=1|0            run the test suite after building (default 1)
 set -euo pipefail
 if [[ $EUID -ne 0 ]]; then
   echo 'Run this installer with sudo.' >&2
@@ -6,244 +20,222 @@ if [[ $EUID -ne 0 ]]; then
 fi
 source /etc/os-release
 if [[ "${ID:-}" != debian && "${ID:-}" != raspbian ]]; then
-  echo 'This installer supports Raspberry Pi OS / Debian only. See README for local development.' >&2
+  echo 'This installer supports Raspberry Pi OS / Debian only. See README for building on a development computer.' >&2
   exit 1
 fi
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-if [[ ! -t 0 ]]; then
-  echo 'Run in an interactive terminal so the application password can be set.' >&2
-  exit 1
-fi
-
-# Interface:
-#   local (default) - the operator console runs on the Pi's own desktop (python3 -m mechanical_tv.app), started
-#                     with the desktop session, full screen. No web server, password or browser.
-#   web             - the password-protected HTTP service on port 8080 (python3 -m mechanical_tv.server).
-# Choose with:  sudo MTV_UI=web bash install.sh
-ui_mode="${MTV_UI:-local}"
-case "$ui_mode" in
-  local|web) ;;
-  *) echo "MTV_UI must be 'local' or 'web' (got '$ui_mode')." >&2; exit 1 ;;
-esac
-# The desktop user who will run the local console: the account that ran sudo.
 desktop_user="${SUDO_USER:-}"
-if [[ "$ui_mode" == local && ( -z "$desktop_user" || "$desktop_user" == root ) ]]; then
-  echo 'Local mode needs the desktop user: run  sudo bash install.sh  from that account (not as root).' >&2
+if [[ -z "$desktop_user" || "$desktop_user" == root ]]; then
+  echo 'Run  sudo bash install.sh  from the desktop account that will operate the TV (not as root).' >&2
   exit 1
 fi
+desktop_home="$(getent passwd "$desktop_user" | cut -d: -f6)"
 
-# Motor driver:
-#   a4988 (default) - STEP/DIR driver (A4988 / DRV8825 / TMC2209) clocked by the Pi's hardware PWM.
-#                     STEP = GPIO 18, DIR = GPIO 23, ENABLE = GPIO 24. See docs/INSTALL.md, section 'Motor driver'.
-#   hat             - Adafruit DC & Stepper Motor HAT (M1/M2).
-# Choose with:  sudo MTV_MOTOR_DRIVER=hat bash install.sh
-motor_driver="${MTV_MOTOR_DRIVER:-a4988}"
-case "$motor_driver" in
-  a4988|hat) ;;
-  *) echo "MTV_MOTOR_DRIVER must be 'a4988' or 'hat' (got '$motor_driver')." >&2; exit 1 ;;
-esac
+# On a re-run, keep the choices made last time unless they are given again.
+env_file=/etc/mechanical-tv/environment
+previous_setting() { if [[ -f "$env_file" ]]; then sed -n "s/^$1=//p" "$env_file" | tail -n1; fi; }
+motor_driver="${MTV_MOTOR_DRIVER:-$(previous_setting MTV_MOTOR_DRIVER)}"
+motor_driver="${motor_driver:-a4988}"
+case "$motor_driver" in a4988|hat) ;; *) echo "MTV_MOTOR_DRIVER must be 'a4988' or 'hat' (got '$motor_driver')." >&2; exit 1 ;; esac
+led_output="${MTV_LED_OUTPUT:-$(previous_setting MTV_LED_OUTPUT)}"
+led_output="${led_output:-gpio}"
+case "$led_output" in gpio|spi) ;; *) echo "MTV_LED_OUTPUT must be 'gpio' or 'spi' (got '$led_output')." >&2; exit 1 ;; esac
 
-if [[ "$motor_driver" == a4988 ]]; then
-  echo 'Installing Mechanical TV in REALTIME HARDWARE mode (A4988 stepper driver on hardware PWM, NEMA 17, LED sync).'
-else
-  echo 'Installing Mechanical TV in REALTIME HARDWARE mode (Adafruit Motor HAT, NEMA 17, LED sync).'
-fi
+echo "Installing Mechanical TV (motor driver: $motor_driver, LED output: $led_output)."
+
+# ---------------------------------------------------------------------------------------------
+# Packages: compiler and Qt to build the console; FFmpeg for library conversion and the USB
+# capture fallback; v4l-utils and gpiod for bench checks.
+# ---------------------------------------------------------------------------------------------
 apt-get update
-apt-get install -y python3 ffmpeg curl python3-pip python3-smbus i2c-tools v4l-utils || true
-# Hardware libraries, installed one at a time so a missing package can't block the others
-for pkg in python3-lgpio python3-smbus2 python3-tk python3-numpy; do
-  apt-get install -y "$pkg" || true
-done
-python3 -c 'import sys; assert sys.version_info >= (3,11), "Python 3.11+ required"'
-if ! id mechanical-tv >/dev/null 2>&1; then
-  useradd --system --home-dir /var/lib/mechanical-tv --shell /usr/sbin/nologin mechanical-tv
-fi
-# Add service user to hardware device groups
-usermod -a -G i2c,gpio,video mechanical-tv 2>/dev/null || true
-if [[ "$ui_mode" == local ]]; then
-  # The desktop user drives the hardware directly from the console window.
-  usermod -a -G i2c,gpio,video,spi "$desktop_user" 2>/dev/null || true
-fi
-# Enable I2C interface on Raspberry Pi if raspi-config is present
-if command -v raspi-config >/dev/null 2>&1; then
+apt-get install -y build-essential cmake ninja-build pkg-config qt6-base-dev libsqlite3-dev \
+  ffmpeg v4l-utils i2c-tools gpiod
+for pkg in rt-tests edid-decode; do apt-get install -y "$pkg" || true; done
+if command -v raspi-config >/dev/null 2>&1 && [[ "$motor_driver" == hat ]]; then
   raspi-config nonint do_i2c 0 2>/dev/null || true
 fi
 
-# Boot settings for the A4988 (only added if missing):
-#   dtparam=audio=off            headphone audio shares the PWM hardware
-#   dtoverlay=pwm,pin=18,func=2  hardware PWM on GPIO 18 drives the STEP pin
-#   gpio=24=op,dh                ENABLE held high from power-on: motor stays off until the app starts it
+# Hardware access without root: the console runs as the desktop user.
+for group in gpio i2c video spi; do
+  getent group "$group" >/dev/null && usermod -a -G "$group" "$desktop_user"
+done
+
+# ---------------------------------------------------------------------------------------------
+# Build and install a versioned release.
+# ---------------------------------------------------------------------------------------------
+build_dir="$(mktemp -d /tmp/mechanical-tv-build.XXXXXX)"
+release_dir="/opt/mechanical-tv/releases/$(date -u +%Y%m%dT%H%M%S)-$$"
+chown "$desktop_user" "$build_dir"
+runuser -u "$desktop_user" -- cmake -S "$project_dir" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$release_dir" -DMTV_SHARE_DIR="$release_dir/share/mechanical-tv"
+runuser -u "$desktop_user" -- cmake --build "$build_dir" -j"$(nproc)"
+if [[ "${MTV_RUN_TESTS:-1}" == 1 ]]; then
+  if ! runuser -u "$desktop_user" -- env QT_QPA_PLATFORM=offscreen "$build_dir/mtv_tests"; then
+    echo "The test suite failed; nothing was installed. Build directory kept at $build_dir" >&2
+    exit 1
+  fi
+fi
+install -d -m 0755 /opt/mechanical-tv/releases /etc/mechanical-tv
+cmake --install "$build_dir"
+chmod -R a+rX "$release_dir"
+previous_release="$(readlink -f /opt/mechanical-tv/current 2>/dev/null || true)"
+[[ -x "$previous_release/bin/mechanical-tv" ]] || previous_release=''   # releases before 0.3 were Python
+ln -sfn "$release_dir" /opt/mechanical-tv/current
+rm -rf "$build_dir"
+# Keep the three newest releases for rollback.
+ls -1dt /opt/mechanical-tv/releases/*/ 2>/dev/null | tail -n +4 | while read -r old; do
+  [[ "$(readlink -f "$old")" == "$(readlink -f /opt/mechanical-tv/current)" ]] || rm -rf "$old"
+done
+
+# ---------------------------------------------------------------------------------------------
+# Settings file shared by every launch path.
+# ---------------------------------------------------------------------------------------------
+if [[ ! -f "$env_file" ]]; then
+  cat > "$env_file" <<'ENV'
+# Mechanical TV settings: one KEY=value per line, read by the console at start (see docs/INSTALL.md).
+MTV_HDMI_DEVICE=/dev/video0
+# MTV_DEFAULT_SOURCE=auto|pattern|hdmi   (auto: Live HDMI when the capture device exists)
+# MTV_HDMI_BRIDGE=auto|csi|usb  MTV_HDMI_FORMAT=auto|uyvy422|mjpeg|none  MTV_HDMI_EDID=auto|none|/path  MTV_HDMI_FIT=fit|crop
+# MTV_HDMI_BACKEND=auto|v4l2|ffmpeg
+# MTV_MICROSTEPS=16   must match the driver's MS1/MS2/MS3 jumpers (use Check microstepping in the console)
+# MTV_RAMP_RATE=2.0   FPS gained per second while spinning up; lower it (e.g. 0.5) for a heavy disk
+# MTV_START_FPS=0.02  speed of the first steps after the driver is enabled
+ENV
+fi
+# Settings of the retired web service mean nothing to the console.
+sed -i -E 's/^(MTV_HOST=|MTV_PORT=|MTV_DATA=\/var\/lib\/mechanical-tv)/# (web service, retired) \1/' "$env_file"
+set_env() {
+  if grep -q "^$1=" "$env_file"; then sed -i "s|^$1=.*|$1=$2|" "$env_file"; else printf '%s=%s\n' "$1" "$2" >> "$env_file"; fi
+}
+set_env MTV_MOTOR_DRIVER "$motor_driver"
+set_env MTV_LED_OUTPUT "$led_output"
+chmod 0644 "$env_file"
+
+# ---------------------------------------------------------------------------------------------
+# Boot configuration (only lines that are missing are added; a backup is kept next to the file).
+# ---------------------------------------------------------------------------------------------
+boot_config=/boot/firmware/config.txt
+[[ -f "$boot_config" ]] || boot_config=/boot/config.txt
+cmdline=/boot/firmware/cmdline.txt
+[[ -f "$cmdline" ]] || cmdline=/boot/cmdline.txt
 reboot_needed=false
+wanted=()
 if [[ "$motor_driver" == a4988 ]]; then
-  boot_config=/boot/firmware/config.txt
-  [[ -f "$boot_config" ]] || boot_config=/boot/config.txt
+  #   dtparam=audio=off            headphone audio shares the PWM hardware
+  #   dtoverlay=pwm,pin=18,func=2  hardware PWM on GPIO 18 drives the STEP pin
+  #   gpio=24=op,dh                ENABLE held high from power-on: the motor stays off until the app starts it
+  wanted+=('dtparam=audio=off' 'dtoverlay=pwm,pin=18,func=2' 'gpio=24=op,dh')
+fi
+if [[ "$motor_driver" == hat ]]; then
+  #   dtparam=i2c_arm_baudrate=400000   one I2C write per step: 100 kHz allows only ~750 steps/s (about 2 FPS)
+  wanted+=('dtparam=i2c_arm=on' 'dtparam=i2c_arm_baudrate=400000')
+fi
+if [[ "$led_output" == spi ]]; then
+  #   dtparam=spi=on       /dev/spidev0.0 for the LED bitstream (MOSI = GPIO 10, pin 19)
+  #   core_freq_fixed=1    the SPI clock is divided from the core clock; a scaling core clock would change the pixel timing
+  wanted+=('dtparam=spi=on' 'core_freq_fixed=1')
+fi
+if [[ -f "$boot_config" && ${#wanted[@]} -gt 0 ]]; then
   missing=()
-  for line in 'dtparam=audio=off' 'dtoverlay=pwm,pin=18,func=2' 'gpio=24=op,dh'; do
-    grep -qxF "$line" "$boot_config" || missing+=("$line")
-  done
+  for line in "${wanted[@]}"; do grep -qxF "$line" "$boot_config" || missing+=("$line"); done
   if (( ${#missing[@]} > 0 )); then
     cp "$boot_config" "$boot_config.mechanical-tv.bak"
-    {
-      echo
-      echo '# Mechanical TV: A4988 stepper driver (added by install.sh)'
-      echo '[all]'
-      printf '%s\n' "${missing[@]}"
-    } >> "$boot_config"
+    { echo; echo '# Mechanical TV (added by install.sh)'; echo '[all]'; printf '%s\n' "${missing[@]}"; } >> "$boot_config"
     reboot_needed=true
   fi
 fi
-
-# An HDMI-to-CSI-2 adapter (TC358743) needs its kernel overlay. Print guidance; the HDMI adapter type cannot be
-# detected before the overlay is loaded, so unlike the motor settings above this is never added automatically.
-hdmi_boot_config=''
-for candidate in /boot/firmware/config.txt /boot/config.txt; do
-  if [[ -f "$candidate" ]]; then hdmi_boot_config="$candidate"; break; fi
-done
-if [[ -n "$hdmi_boot_config" ]] && ! grep -Eq '^[[:space:]]*dtoverlay=tc358743' "$hdmi_boot_config"; then
+# Kernel command line (one line): keep CPU 3 for the realtime LED thread, and let one spidev transfer
+# carry a whole revolution.
+if [[ -f "$cmdline" ]]; then
+  args=()
+  if [[ "${MTV_ISOLATE_CPU:-1}" == 1 ]]; then args+=('isolcpus=3' 'irqaffinity=0-2'); fi
+  if [[ "$led_output" == spi ]]; then args+=('spidev.bufsiz=65536'); fi
+  add=()
+  for a in "${args[@]}"; do grep -qw -- "${a%%=*}" "$cmdline" || add+=("$a"); done
+  if (( ${#add[@]} > 0 )); then
+    cp "$cmdline" "$cmdline.mechanical-tv.bak"
+    sed -i "1 s|\$| ${add[*]}|" "$cmdline"
+    reboot_needed=true
+  fi
+  if [[ "${MTV_ISOLATE_CPU:-1}" == 0 ]] && grep -qE '(^| )(isolcpus=3|irqaffinity=0-2)( |$)' "$cmdline"; then
+    cp "$cmdline" "$cmdline.mechanical-tv.bak"
+    sed -i -E '1 s/ ?isolcpus=3//; 1 s/ ?irqaffinity=0-2//' "$cmdline"
+    reboot_needed=true
+  fi
+fi
+if [[ -n "$boot_config" ]] && [[ -f "$boot_config" ]] && ! grep -Eq '^[[:space:]]*dtoverlay=tc358743' "$boot_config"; then
   cat <<NOTICE
-NOTE: $hdmi_boot_config has no dtoverlay=tc358743. If the HDMI input is an HDMI-to-CSI-2 adapter
-(GeeekPi/52Pi, Geekworm, Waveshare, Auvidea B101) add these lines to it and reboot:
+NOTE: $boot_config has no dtoverlay=tc358743. For the HDMI-to-CSI-2 adapter (GeeekPi/52Pi, Geekworm,
+Waveshare, Auvidea B101) add these lines and reboot:
   camera_auto_detect=0
   dtoverlay=tc358743
 USB HDMI capture dongles need no change. See docs/INSTALL.md, section 'HDMI input'.
 NOTICE
 fi
 
-install -d -m 0755 /opt/mechanical-tv/releases /etc/mechanical-tv
-install -d -m 0700 -o mechanical-tv -g mechanical-tv /var/lib/mechanical-tv
-release_dir="/opt/mechanical-tv/releases/$(date -u +%Y%m%dT%H%M%S)-$$"
-install -d -m 0755 "$release_dir"
-cp -R "$project_dir/mechanical_tv" "$release_dir/"
-chmod -R a+rX "$release_dir"
-if [[ ! -f /var/lib/mechanical-tv/auth.json ]]; then
-  (cd "$release_dir" && runuser -u mechanical-tv -- python3 -m mechanical_tv.server init --data /var/lib/mechanical-tv)
-fi
-if [[ ! -f /etc/mechanical-tv/environment ]]; then
-  printf '%s\n' 'MTV_DATA=/var/lib/mechanical-tv' 'MTV_HOST=0.0.0.0' 'MTV_PORT=8080' \
-    'MTV_HDMI_DEVICE=/dev/video0' '# MTV_DEFAULT_SOURCE=hdmi starts capture at boot (web default: pattern; local console: hdmi when the device exists)' \
-    '# MTV_HDMI_BRIDGE=auto|csi|usb  MTV_HDMI_FORMAT=auto|uyvy422|mjpeg|none  MTV_HDMI_EDID=auto|none|/path  MTV_HDMI_FIT=fit|crop' \
-    '# MTV_HDMI_BACKEND=auto|v4l2|ffmpeg|opencv  (auto: in-process V4L2 reader for the CSI bridge, FFmpeg otherwise)' \
-    '# MTV_RAMP_RATE=2.0  FPS gained per second while spinning up; lower it (e.g. 0.5) if a heavy disk stalls the motor' \
-    > /etc/mechanical-tv/environment
-  chmod 0644 /etc/mechanical-tv/environment
-fi
-# The motor driver choice must reach the local console too (the web service also gets it from its drop-in).
-if grep -q '^MTV_MOTOR_DRIVER=' /etc/mechanical-tv/environment; then
-  sed -i "s/^MTV_MOTOR_DRIVER=.*/MTV_MOTOR_DRIVER=$motor_driver/" /etc/mechanical-tv/environment
-else
-  printf 'MTV_MOTOR_DRIVER=%s\n' "$motor_driver" >> /etc/mechanical-tv/environment
-fi
-# Stop before backing up SQLite. Never copy a live database as an update backup.
-systemctl stop mechanical-tv.service 2>/dev/null || true
-if [[ -f /var/lib/mechanical-tv/media/library.sqlite3 ]]; then
-  install -d -m 0700 /var/lib/mechanical-tv/backups
-  cp /var/lib/mechanical-tv/media/library.sqlite3 "/var/lib/mechanical-tv/backups/library-$(date -u +%Y%m%dT%H%M%S).sqlite3"
-fi
-previous_release="$(readlink -f /opt/mechanical-tv/current 2>/dev/null || true)"
-ln -sfn "$release_dir" /opt/mechanical-tv/current
-install -m 0644 "$project_dir/packaging/mechanical-tv.service" /etc/systemd/system/mechanical-tv.service
-
-# Hardware settings for the service, managed by this installer (rewritten on every install).
-dropin_dir=/etc/systemd/system/mechanical-tv.service.d
-install -d -m 0755 "$dropin_dir"
-# Hand-made overrides from earlier troubleshooting are replaced by 10-hardware.conf
-rm -f "$dropin_dir/lgpio.conf" "$dropin_dir/motor.conf" "$dropin_dir/a4988.conf"
-{
-  echo '[Service]'
-  echo '# Managed by install.sh - edits here are overwritten on the next install.'
-  echo '# lgpio creates helper files in its working directory; the app directory is read-only.'
-  echo 'Environment=LG_WD=/tmp'
-  if [[ "$motor_driver" == a4988 ]]; then
-    echo 'Environment=MTV_MOTOR_DRIVER=a4988'
-    echo '# Export the hardware PWM channel (STEP pin) as root and let the service user drive it.'
-    echo "ExecStartPre=+/bin/sh -c 'test -d /sys/class/pwm/pwmchip0/pwm0 || echo 0 > /sys/class/pwm/pwmchip0/export; sleep 0.5; chgrp gpio /sys/class/pwm/pwmchip0/pwm0/period /sys/class/pwm/pwmchip0/pwm0/duty_cycle /sys/class/pwm/pwmchip0/pwm0/enable; chmod g+rw /sys/class/pwm/pwmchip0/pwm0/period /sys/class/pwm/pwmchip0/pwm0/duty_cycle /sys/class/pwm/pwmchip0/pwm0/enable'"
-  fi
-} > "$dropin_dir/10-hardware.conf"
-chmod 0644 "$dropin_dir/10-hardware.conf"
-systemctl daemon-reload
-
 # ---------------------------------------------------------------------------------------------
-# Local console (default): a desktop launcher plus an autostart entry for the desktop user, and the
-# web service disabled so the two never fight over /dev/video0, the GPIOs and the PWM channel.
+# Realtime permissions and boot-time tuning.
 # ---------------------------------------------------------------------------------------------
-if [[ "$ui_mode" == local ]]; then
+cat > /etc/security/limits.d/90-mechanical-tv.conf <<'LIMITS'
+# Mechanical TV: the console's LED/index thread runs SCHED_FIFO and locks its memory.
+@gpio  -  rtprio   80
+@gpio  -  memlock  unlimited
+LIMITS
+if [[ "$led_output" == gpio ]]; then
+  # The bit-banged LED thread spins for the whole revolution on CPU 3; without this the kernel pauses
+  # realtime threads for 50 ms every second (a dark band on the disk). Other CPUs are unaffected.
+  echo 'kernel.sched_rt_runtime_us = -1' > /etc/sysctl.d/90-mechanical-tv.conf
+  sysctl -q -p /etc/sysctl.d/90-mechanical-tv.conf || true
+elif [[ -f /etc/sysctl.d/90-mechanical-tv.conf ]]; then
+  rm -f /etc/sysctl.d/90-mechanical-tv.conf
+  sysctl -q -w kernel.sched_rt_runtime_us=950000 || true
+fi
+install -m 0644 "$project_dir/packaging/mechanical-tv-hw.service" /etc/systemd/system/mechanical-tv-hw.service
+install -m 0755 "$project_dir/packaging/mechanical-tv-hw-setup" /opt/mechanical-tv/mechanical-tv-hw-setup
+
+# The web service of versions before 0.3 is retired: the console owns the hardware.
+if systemctl list-unit-files mechanical-tv.service >/dev/null 2>&1; then
   systemctl disable --now mechanical-tv.service 2>/dev/null || true
-  install -m 0644 "$project_dir/packaging/mechanical-tv.desktop" /usr/share/applications/mechanical-tv.desktop
-  install -D -m 0644 "$project_dir/packaging/mechanical-tv.png" /usr/share/icons/hicolor/256x256/apps/mechanical-tv.png
-  gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
-  desktop_home="$(getent passwd "$desktop_user" | cut -d: -f6)"
-  # A double-clickable icon on the desktop (the file must be executable for the file manager to launch it).
-  if [[ -d "$desktop_home/Desktop" ]]; then
-    install -m 0755 -o "$desktop_user" -g "$desktop_user" "$project_dir/packaging/mechanical-tv.desktop" "$desktop_home/Desktop/mechanical-tv.desktop"
-  fi
-  if [[ "${MTV_AUTOSTART:-1}" == 1 && -d "$desktop_home" ]]; then
-    install -d -m 0755 -o "$desktop_user" -g "$desktop_user" "$desktop_home/.config" "$desktop_home/.config/autostart"
-    install -m 0644 -o "$desktop_user" -g "$desktop_user" "$project_dir/packaging/mechanical-tv.desktop" "$desktop_home/.config/autostart/mechanical-tv.desktop"
-  fi
-  # Verify the console can import its engine and Tk without opening a window.
-  if ! (cd /opt/mechanical-tv/current && runuser -u "$desktop_user" -- /usr/bin/python3 -m mechanical_tv.app --check --env-file /etc/mechanical-tv/environment > /tmp/mechanical-tv-check.json); then
-    echo 'Console check failed (is python3-tk installed?). Report: /tmp/mechanical-tv-check.json' >&2
-    cat /tmp/mechanical-tv-check.json >&2 || true
-    if [[ -n "$previous_release" && "$previous_release" != /opt/mechanical-tv/current && -d "$previous_release" ]]; then
-      ln -sfn "$previous_release" /opt/mechanical-tv/current
-      echo 'Restored the previous application directory.' >&2
-    fi
-    exit 1
-  fi
-  if [[ "$reboot_needed" == true ]]; then
-    echo "Added A4988 boot settings to $boot_config (backup: $boot_config.mechanical-tv.bak)."
-    echo 'Reboot to finish:  sudo reboot'
-    echo 'The Mechanical TV console opens full screen when the desktop starts.'
-    exit 0
-  fi
-  echo "Mechanical TV console installed (motor driver: $motor_driver)."
-  echo "It opens full screen with the desktop. Start it now from the desktop icon, the menu (Sound & Video > Mechanical TV) or with:"
-  echo "  python3 -m mechanical_tv.app --env-file /etc/mechanical-tv/environment"
-  echo "Run from /opt/mechanical-tv/current. F11 full screen, F12 debug log, Ctrl+Q quit. Log file: ~/.local/share/mechanical-tv/logs/"
-  echo "Log out and back in once so the new hardware group memberships (gpio, i2c, video, spi) apply."
-  echo "Web interface instead:  sudo MTV_UI=web bash install.sh"
-  exit 0
+  rm -f /etc/systemd/system/mechanical-tv.service
+  rm -rf /etc/systemd/system/mechanical-tv.service.d
+fi
+systemctl daemon-reload
+systemctl enable mechanical-tv-hw.service
+systemctl start mechanical-tv-hw.service || true
+
+# ---------------------------------------------------------------------------------------------
+# Desktop application.
+# ---------------------------------------------------------------------------------------------
+install -m 0644 "$project_dir/packaging/mechanical-tv.desktop" /usr/share/applications/mechanical-tv.desktop
+install -D -m 0644 "$project_dir/packaging/mechanical-tv.png" /usr/share/icons/hicolor/256x256/apps/mechanical-tv.png
+gtk-update-icon-cache -q /usr/share/icons/hicolor 2>/dev/null || true
+if [[ -d "$desktop_home/Desktop" ]]; then
+  install -m 0755 -o "$desktop_user" -g "$desktop_user" "$project_dir/packaging/mechanical-tv.desktop" "$desktop_home/Desktop/mechanical-tv.desktop"
+fi
+if [[ "${MTV_AUTOSTART:-1}" == 1 && -d "$desktop_home" ]]; then
+  install -d -m 0755 -o "$desktop_user" -g "$desktop_user" "$desktop_home/.config" "$desktop_home/.config/autostart"
+  install -m 0644 -o "$desktop_user" -g "$desktop_user" "$project_dir/packaging/mechanical-tv.desktop" "$desktop_home/.config/autostart/mechanical-tv.desktop"
+else
+  rm -f "$desktop_home/.config/autostart/mechanical-tv.desktop"
 fi
 
-# Remove local-mode autostart and desktop launchers so the web service alone owns the hardware.
-if [[ -n "$desktop_user" && "$desktop_user" != root ]]; then
-  desktop_home="$(getent passwd "$desktop_user" | cut -d: -f6)"
-  rm -f "$desktop_home/.config/autostart/mechanical-tv.desktop" "$desktop_home/Desktop/mechanical-tv.desktop"
-fi
-rm -f /usr/share/applications/mechanical-tv.desktop
-
-if [[ "$reboot_needed" == true ]]; then
-  systemctl enable mechanical-tv.service
-  echo "Added A4988 boot settings to $boot_config (backup: $boot_config.mechanical-tv.bak)."
-  echo 'Reboot to finish:  sudo reboot'
-  echo 'Mechanical TV starts automatically after the reboot.'
-  exit 0
-fi
-
-systemctl enable --now mechanical-tv.service
-configured_port="$(sed -n 's/^MTV_PORT=//p' /etc/mechanical-tv/environment)"
-if [[ ! "$configured_port" =~ ^[0-9]+$ ]]; then
-  echo 'MTV_PORT must be a numeric port in /etc/mechanical-tv/environment.' >&2
-  exit 1
-fi
-healthy=false
-for attempt in {1..20}; do
-  if curl --fail --silent --max-time 2 "http://127.0.0.1:$configured_port/healthz" >/dev/null; then
-    healthy=true
-    break
-  fi
-  sleep 1
-done
-if [[ "$healthy" != true ]]; then
-  echo 'Startup check failed. Inspect: journalctl -u mechanical-tv -n 100' >&2
-  if [[ -n "$previous_release" && "$previous_release" != /opt/mechanical-tv/current && -d "$previous_release" ]]; then
+if ! runuser -u "$desktop_user" -- /opt/mechanical-tv/current/bin/mechanical-tv --check --env-file "$env_file" > /tmp/mechanical-tv-check.json; then
+  echo 'Console check failed. Report: /tmp/mechanical-tv-check.json' >&2
+  cat /tmp/mechanical-tv-check.json >&2 || true
+  if [[ -n "$previous_release" && -d "$previous_release" ]]; then
     ln -sfn "$previous_release" /opt/mechanical-tv/current
-    systemctl restart mechanical-tv.service
-    echo 'Restored the previous application directory. Check service health before use.' >&2
+    echo 'Restored the previous release.' >&2
   fi
   exit 1
 fi
-echo "Mechanical TV is running in REALTIME mode (motor driver: $motor_driver)."
-echo "Open http://$(hostname).local:$configured_port or http://<Pi-IP-address>:$configured_port"
-echo "Select 'Live HDMI Video (capture adapter)' in the page to start capture, or set MTV_DEFAULT_SOURCE=hdmi in /etc/mechanical-tv/environment."
-echo 'See docs/INSTALL.md, section HDMI input.'
+
+echo "Mechanical TV $(/opt/mechanical-tv/current/bin/mechanical-tv --version | awk '{print $3}') installed in $release_dir."
+echo "Start it from the desktop icon, the menu (Sound & Video > Mechanical TV) or with:"
+echo "  /opt/mechanical-tv/current/bin/mechanical-tv --env-file $env_file"
+echo "F11 full screen, F12 debug log, Ctrl+Q quit. Log file: ~/.local/share/mechanical-tv/logs/mechanical-tv.log"
+if [[ "$reboot_needed" == true ]]; then
+  echo "Boot settings were added ($boot_config, $cmdline; backups *.mechanical-tv.bak)."
+  echo 'Reboot to finish:  sudo reboot   (the console opens full screen with the desktop)'
+else
+  echo "Log out and back in once so the hardware groups and realtime limits apply."
+fi

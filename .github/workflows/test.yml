@@ -1,20 +1,32 @@
-name: Test simulation release
+name: Build and test
 on: [push, pull_request]
 permissions:
   contents: read
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  ubuntu:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install FFmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - name: Test conversion, playback, and HTTP API
-        run: python3 -m unittest discover -s tests -v
-      - name: Check shell and JavaScript syntax
+      - name: Install build dependencies and FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build qt6-base-dev libsqlite3-dev libgl1-mesa-dev ffmpeg python3
+      - name: Build (warnings are errors)
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMTV_WERROR=ON && cmake --build build
+      - name: Tests
+        run: QT_QPA_PLATFORM=offscreen ./build/mtv_tests
+      - name: Shell syntax and EDID files
         run: |
           bash -n install.sh packaging/make-test-clip.sh
-          node --check mechanical_tv/static/app.js
+          sh -n packaging/mechanical-tv-hw-setup
+          python3 packaging/make-edid.py --check
+  debian-trixie:
+    # The Raspberry Pi OS toolchain (Debian 13: GCC 14, Qt 6.8)
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies and FFmpeg
+        run: apt-get update && apt-get install -y build-essential cmake ninja-build qt6-base-dev libsqlite3-dev ffmpeg
+      - name: Build (warnings are errors)
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMTV_WERROR=ON && cmake --build build
+      - name: Tests
+        run: QT_QPA_PLATFORM=offscreen ./build/mtv_tests

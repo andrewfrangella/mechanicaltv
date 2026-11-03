@@ -1,0 +1,38 @@
+#!/bin/sh
+# Boot and shutdown hardware handling for the Mechanical TV console (run as root by mechanical-tv-hw.service).
+#
+#   mechanical-tv-hw-setup start   at boot: export the PWM channel that clocks the A4988 STEP pin to the
+#                                  gpio group, and fix the CPU frequency (performance governor)
+#   mechanical-tv-hw-setup stop    at shutdown, and whenever the console did not exit cleanly: stop the
+#                                  STEP clock, release the motor coils (ENABLE high) and turn the LED off
+#
+# GPIO outputs keep their level after a program exits, so this is the last line of defence against a
+# motor left spinning or a 3 W LED left lit.
+. /etc/mechanical-tv/environment 2>/dev/null || true
+enable_pin="${MTV_ENABLE_GPIO:-24}"
+led_pin="${MTV_LED_PIN:-21}"
+chip=$(ls -d /sys/class/pwm/pwmchip* 2>/dev/null | head -n1)
+
+case "${1:-start}" in
+  start)
+    if [ -n "$chip" ]; then
+      [ -d "$chip/pwm0" ] || echo 0 > "$chip/export" 2>/dev/null || true
+      sleep 0.5
+      for f in period duty_cycle enable; do
+        [ -e "$chip/pwm0/$f" ] && chgrp gpio "$chip/pwm0/$f" && chmod g+rw "$chip/pwm0/$f"
+      done
+    fi
+    for g in /sys/devices/system/cpu/cpufreq/policy*/scaling_governor; do
+      [ -w "$g" ] && echo performance > "$g"
+    done
+    ;;
+  stop)
+    [ -n "$chip" ] && [ -e "$chip/pwm0/enable" ] && echo 0 > "$chip/pwm0/enable" 2>/dev/null
+    if command -v pinctrl >/dev/null 2>&1; then
+      pinctrl set "$enable_pin" op dh 2>/dev/null
+      pinctrl set "$led_pin" op dl 2>/dev/null
+      pinctrl set 10 op dl 2>/dev/null   # SPI MOSI (SPI LED output)
+    fi
+    ;;
+esac
+exit 0

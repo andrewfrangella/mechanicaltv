@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the EDID files shipped in mechanical_tv/edid/.
+"""Generate the EDID files shipped in edid/.
 
 A TC358743 HDMI-to-CSI-2 bridge (GeeekPi/52Pi, Geekworm, Waveshare, Auvidea B101)
 has no EDID of its own. Until one is loaded with v4l2-ctl the HDMI source sees no
@@ -9,7 +9,7 @@ advertise only modes the Pi 4's 2-lane CSI port carries in UYVY: 1080p30 and 720
 2-lane link cannot carry it.
 
 Usage:
-  python3 packaging/make-edid.py            # rewrite mechanical_tv/edid/*.txt
+  python3 packaging/make-edid.py            # rewrite edid/*.txt
   python3 packaging/make-edid.py --check    # verify the shipped files match
   python3 packaging/make-edid.py --print 1080p30
 """
@@ -17,7 +17,7 @@ import argparse
 from pathlib import Path
 import sys
 
-EDID_DIR = Path(__file__).resolve().parent.parent / "mechanical_tv" / "edid"
+EDID_DIR = Path(__file__).resolve().parent.parent / "edid"
 
 
 def checksum(block: bytes) -> int:
