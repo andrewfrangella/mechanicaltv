@@ -44,7 +44,13 @@ std::string resolve_default_source(const Args& args);
 // The requested data directory if this user can write it, else the per-user default (with a log line).
 std::string usable_data_dir(const std::string& requested);
 json check_report(const Args& args);
+// Settings chosen in the console (Microsteps, Spin-up ramp), kept in <data>/settings.json. They
+// override MTV_MICROSTEPS and MTV_RAMP_RATE. A missing or unreadable file is an empty object.
+json load_console_settings(const std::string& data_dir);
+// Merge `patch` into that file (other keys are kept). False, with *why set, when it cannot be written.
+bool save_console_settings(const std::string& data_dir, const json& patch, std::string* why = nullptr);
 // Create the engine; if real hardware fails to initialise, report why and fall back to simulation.
+// Applies the saved console settings.
 std::unique_ptr<Studio> build_studio(Args& args, std::string* hardware_note);
 
 }  // namespace mtv::console

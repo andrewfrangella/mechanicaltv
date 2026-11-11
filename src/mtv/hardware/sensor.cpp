@@ -35,6 +35,11 @@ bool MockIndexSensor::open(std::string*) {
 
 void MockIndexSensor::close() { open_ = false; }
 
+void MockIndexSensor::set_steps_per_rev(int spr) {
+  spr_ = std::max(1, spr);
+  rephase_ = true;
+}
+
 void MockIndexSensor::inject(std::int64_t t_ns) {
   std::lock_guard<std::mutex> lock(lock_);
   injected_.push_back(t_ns);
@@ -54,6 +59,7 @@ EdgeResult MockIndexSensor::wait(std::int64_t timeout_ns) {
     std::int64_t now = now_ns();
     if (coupled_ && count_ && rate_) {
       double c = count_();
+      if (rephase_.exchange(false)) next_boundary_ = (std::floor((c - phase_) / spr_) + 1.0) * spr_ + phase_;
       if (c >= next_boundary_) {
         // Report the moment the count crossed the boundary, like a kernel edge timestamp, even if
         // this call came late (the caller was busy emitting the previous revolution).
@@ -129,6 +135,7 @@ class GpioIndexSensor : public IndexSensor {
   }
   std::string driver() const override { return "GPIOOptoSensor"; }
   std::string backend() const override { return "gpio-cdev"; }
+  int level() override { return line_ ? line_->get() : -1; }
 
  private:
   std::unique_ptr<hw::GpioLine> line_;
@@ -152,6 +159,10 @@ bool RevolutionTracker::on_edge(std::int64_t t_ns, double target_fps, double ste
     // Debounce: an edge closer than 20 ms, or than half the last revolution, is contact bounce or
     // noise on the sensor line, not a revolution.
     if (period < MIN_PERIOD_S || (period_s_ > 0 && period < 0.5 * period_s_)) {
+      ++rejected_;
+      return false;
+    }
+    if (steps_per_rev > 0 && last_steps_ >= 0 && std::fabs(step_count - last_steps_) < MIN_STEPS) {
       ++rejected_;
       return false;
     }

@@ -37,6 +37,9 @@ class IndexSensor {
   virtual std::string driver() const = 0;    // "GPIOOptoSensor" | "MockOptoSensor"
   virtual std::string backend() const = 0;   // "gpio-cdev" | "simulated"
   virtual bool is_mock() const { return false; }
+  // The line's present level (1 = high, 0 = low, -1 = unknown or not open). Call only from the thread
+  // that opens and closes the sensor.
+  virtual int level() { return -1; }
   int pin = 4;
 };
 
@@ -56,11 +59,15 @@ class MockIndexSensor : public IndexSensor {
   std::string backend() const override { return "simulated"; }
   bool is_mock() const override { return true; }
   void inject(std::int64_t t_ns);   // queue an edge (tests)
+  int level() override { return open_ ? mock_level.load() : -1; }
+  std::atomic<int> mock_level{-1};   // what level() reports while open (tests)
   void set_motor_coupled(bool on) { coupled_ = on; }
+  void set_steps_per_rev(int spr);   // follow a microstep change; the next notch is re-phased
 
  private:
   std::function<double()> count_, rate_;
-  int spr_;
+  std::atomic<int> spr_;
+  std::atomic<bool> rephase_{false};
   double phase_ = 0.0;
   std::atomic<bool> open_{false};
   std::atomic<bool> coupled_{true};
@@ -75,6 +82,10 @@ std::unique_ptr<IndexSensor> make_gpio_index_sensor(int pin);   // nullptr when 
 class RevolutionTracker {
  public:
   static constexpr double MIN_PERIOD_S = 0.02;   // absolute debounce: 50 rev/s
+  // Step debounce: an edge with fewer motor steps than this since the last accepted notch is not a
+  // revolution in any stepping mode (full step takes 200). It is bounce, sensor noise, or the notch
+  // edge parked in the beam and shaken across the threshold by the energised coils.
+  static constexpr double MIN_STEPS = 100.0;
   static constexpr double LOCK_TOLERANCE = 0.03; // measured FPS within 3 % of the target
   static constexpr double LOCK_JITTER_MS = 2.0;  // and jitter below 2 ms
   static constexpr int LOCK_HISTORY = 5;         // after at least 5 periods
@@ -82,7 +93,8 @@ class RevolutionTracker {
   static constexpr int LOCK_OUT = 2;             // consecutive bad revolutions to unlock
 
   void reset();
-  // Returns true when the edge was accepted (false: bounce or duplicate).
+  // Returns true when the edge was accepted (false: bounce, noise or duplicate). `step_count` is the
+  // motor's step count at the edge; edges too few steps after the last accepted one are rejected.
   bool on_edge(std::int64_t t_ns, double target_fps, double step_count, int steps_per_rev);
   // Drop the lock after a silence longer than `limit_s`; returns true if the lock was dropped.
   bool check_silence(std::int64_t now_ns, double limit_s);

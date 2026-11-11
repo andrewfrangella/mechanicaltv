@@ -97,7 +97,8 @@ MTV_HDMI_DEVICE=/dev/video0
 # MTV_DEFAULT_SOURCE=auto|pattern|hdmi   (auto: Live HDMI when the capture device exists)
 # MTV_HDMI_BRIDGE=auto|csi|usb  MTV_HDMI_FORMAT=auto|uyvy422|mjpeg|none  MTV_HDMI_EDID=auto|none|/path  MTV_HDMI_FIT=fit|crop
 # MTV_HDMI_BACKEND=auto|v4l2|ffmpeg
-# MTV_MICROSTEPS=16   must match the driver's MS1/MS2/MS3 jumpers (use Check microstepping in the console)
+# MTV_MICROSTEPS=16   must match the driver's MS1/MS2/MS3 jumpers (use Check microstepping in the console);
+#                     the console's Microsteps selector, saved in the data directory, overrides this
 # MTV_RAMP_RATE=2.0   FPS gained per second while spinning up; lower it (e.g. 0.5) for a heavy disk
 # MTV_START_FPS=0.02  speed of the first steps after the driver is enabled
 ENV

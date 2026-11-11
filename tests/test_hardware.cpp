@@ -115,6 +115,15 @@ TEST_CASE("revolution tracker: debounce, lock hysteresis, jitter, silence, steps
   CHECK(t.locked());
   CHECK(t.check_silence(now + 400'000'000, 0.35));
   CHECK_FALSE(t.locked());
+  // an edge too few motor steps after the last notch is noise, however long after it arrives
+  RevolutionTracker noisy;
+  CHECK(noisy.on_edge(1'000'000'000LL, 10.0, 0.0, 3200));
+  CHECK_FALSE(noisy.on_edge(1'100'000'000LL, 10.0, 40.0, 3200));   // 100 ms later but only 40 steps
+  CHECK_FALSE(noisy.on_edge(1'200'000'000LL, 10.0, 99.0, 3200));
+  CHECK(noisy.rejected() == 2);
+  CHECK(noisy.on_edge(1'300'000'000LL, 10.0, 3200.0, 3200));   // the real notch, one revolution on
+  CHECK(noisy.steps_per_rev_measured() == doctest::Approx(3200));
+  CHECK(noisy.period_s() == doctest::Approx(0.3));
   // off-speed never locks
   RevolutionTracker slow;
   for (int i = 0; i < 10; ++i) slow.on_edge(i * 120'000'000LL + 1, 10.0, i * 3200.0, 3200);
@@ -254,7 +263,29 @@ TEST_CASE("speed ceiling is 24 FPS and the floor 1 FPS") {
   CHECK(sim.rt->target_fps() == doctest::Approx(1.0));
 }
 
-TEST_CASE("stall detection: no index pulses while commanded to spin stops the motor with the reason") {
+TEST_CASE("no index pulses: the motor keeps running, the LED stays dark, and a warning names the sensor") {
+  Sim sim;
+  sim.sensor->set_motor_coupled(false);   // no disk, or the notch never reaches the sensor
+  sim.rt->start();
+  auto warned = [&] { return sim.rt->get_status()["warning"].get<std::string>().find("No index pulse") != std::string::npos; };
+  CHECK(testing::wait_until(warned, 4.0));
+  json st = sim.rt->get_status();
+  CHECK(st["error"] == "");
+  CHECK(st["state"] != "error");
+  CHECK(sim.rt->motor().is_running());
+  CHECK(sim.led->blanked);
+  CHECK(sim.led->frames_rendered == 0);
+  // the disk is fitted again: pulses return, the warning clears and the LED follows the disk
+  sim.sensor->set_motor_coupled(true);
+  CHECK(testing::wait_until([&] { return sim.rt->state() == "locked"; }, 6.0));
+  CHECK(testing::wait_until([&] { return sim.rt->get_status()["warning"] == ""; }, 2.0));
+  CHECK(testing::wait_until([&] { return sim.led->frames_rendered > 3; }, 2.0));
+  sim.rt->stop();
+  CHECK(sim.rt->get_status()["warning"] == "");
+}
+
+TEST_CASE("MTV_STALL_STOP=1: no index pulses while commanded to spin stops the motor with the reason") {
+  testing::EnvGuard stop_on_stall("MTV_STALL_STOP", "1");
   Sim sim;
   sim.sensor->set_motor_coupled(false);   // the disk does not turn
   sim.rt->start();
@@ -269,13 +300,55 @@ TEST_CASE("stall detection: no index pulses while commanded to spin stops the mo
   sim.rt->stop();
 }
 
-TEST_CASE("microstep mismatch is detected while spinning: 16x too many revolutions means full step") {
-  Sim sim(200, 1.0, "0.5");   // the disk turns once every 200 steps although the software assumes 3200
+TEST_CASE("the LED revolution length comes from the motor's speed, the notch only sets where it starts") {
+  Sim sim(3200, 10.0, "2.0");   // slow ramp: the disk is still accelerating for several revolutions
   sim.rt->start();
-  CHECK(testing::wait_until([&] { return sim.rt->state() == "error"; }, 8.0));
-  std::string err = sim.rt->get_status()["error"];
-  CHECK(err.find("1/1 microstepping") != std::string::npos);
-  CHECK(err.find("MS1, MS2 and MS3") != std::string::npos);
+  CHECK(testing::wait_until([&] { return sim.led->frames_rendered >= 1; }, 6.0));
+  // while ramping, each output is shorter than the last revolution measured at the sensor
+  std::int64_t during_ramp = sim.led->last_period_ns;
+  CHECK(during_ramp > 0);
+  CHECK(testing::wait_until([&] { return sim.rt->state() == "locked"; }, 12.0));
+  CHECK(testing::wait_until([&] { return std::llabs(sim.led->last_period_ns - 100'000'000LL) < 1'000'000; }, 2.0));
+  CHECK(during_ramp > 100'000'000LL);
+  sim.rt->stop();
+}
+
+TEST_CASE("microstep mismatch is detected while spinning: 16x too many revolutions means full step") {
+  {
+    Sim sim(200, 1.0, "0.5");   // the disk turns once every 200 steps although the software assumes 3200
+    sim.rt->start();
+    auto warned = [&] { return !sim.rt->get_status()["warning"].get<std::string>().empty(); };
+    CHECK(testing::wait_until(warned, 8.0));
+    std::string warn = sim.rt->get_status()["warning"];
+    CHECK(warn.find("1/1 microstepping") != std::string::npos);
+    CHECK(warn.find("MS1, MS2 and MS3") != std::string::npos);
+    CHECK(sim.rt->motor().is_running());   // the motor is not stopped ...
+    // ... and the LED is timed from the notch (the disk turns at 16 FPS), not from the motor's 1 FPS
+    CHECK(testing::wait_until([&] { return std::llabs(sim.led->last_period_ns - 62'500'000LL) < 3'000'000; }, 3.0));
+    sim.rt->stop();
+  }
+  {
+    testing::EnvGuard stop_on_stall("MTV_STALL_STOP", "1");
+    Sim sim(200, 1.0, "0.5");
+    sim.rt->start();
+    CHECK(testing::wait_until([&] { return sim.rt->state() == "error"; }, 8.0));
+    std::string err = sim.rt->get_status()["error"];
+    CHECK(err.find("Motor stopped") != std::string::npos);
+    CHECK(err.find("1/1 microstepping") != std::string::npos);
+  }
+}
+
+TEST_CASE("a disk slipping behind the motor still gets a picture, timed from the index sensor, with a warning") {
+  Sim sim(4800, 10.0);   // 1.5x the expected steps per revolution: the disk turns at 6.67 FPS, the motor at 10
+  sim.rt->start();
+  auto warned = [&] { return sim.rt->get_status()["warning"].get<std::string>().find("not following") != std::string::npos; };
+  CHECK(testing::wait_until(warned, 6.0));
+  CHECK(sim.rt->motor().is_running());
+  long frames = sim.led->frames_rendered;
+  CHECK(testing::wait_until([&] { return sim.led->frames_rendered > frames + 3; }, 3.0));
+  CHECK(std::llabs(sim.led->last_period_ns - 150'000'000LL) < 5'000'000);
+  CHECK_FALSE(sim.led->blanked);
+  sim.rt->stop();
 }
 
 TEST_CASE("microstep self-test passes when the jumpers match and names the mode when they do not") {
@@ -364,6 +437,136 @@ TEST_CASE("the microstep check ignores sensor bounces and can be cancelled") {
     CHECK(r["message"] == "Microstep check cancelled.");
     CHECK_FALSE(sim.rt->motor().is_running());
   }
+}
+
+TEST_CASE("the console can change the microstep setting and the ramp while the motor is stopped") {
+  Sim sim;
+  CHECK(sim.rt->microsteps() == 16);
+  sim.rt->set_microsteps(8);
+  CHECK(sim.rt->microsteps() == 8);
+  CHECK(sim.motor->steps_per_rev() == 1600);
+  CHECK(sim.rt->get_status()["microsteps"] == 8);
+  sim.rt->set_ramp_rate(1.5);
+  CHECK(sim.rt->motor().ramp_rate() == doctest::Approx(1.5));
+  CHECK(sim.rt->get_status()["ramp_rate_fps"] == doctest::Approx(1.5));
+  CHECK_THROWS_AS(sim.rt->set_microsteps(3), std::invalid_argument);
+  sim.rt->set_ramp_rate(50);
+  sim.rt->start();   // the simulated disk follows the new setting and locks
+  CHECK(testing::wait_until([&] { return sim.rt->state() == "locked"; }, 6.0));
+  CHECK_THROWS_AS(sim.rt->set_microsteps(16), std::invalid_argument);
+  CHECK(sim.rt->microsteps() == 8);
+  CHECK(sim.rt->get_status()["sensor"]["steps_per_rev_measured"].get<double>() == doctest::Approx(1600).epsilon(0.05));
+  sim.rt->stop();
+}
+
+TEST_CASE("a flickering sensor at start-up (notch parked in the beam) is ignored as bounce and the run locks") {
+  Sim sim(3200, 10.0, "0.5");
+  sim.sensor->set_motor_coupled(false);
+  sim.rt->start();
+  CHECK(testing::wait_until([&] { return sim.rt->sensor().is_open() && sim.rt->motor().current_fps() > 0; }, 3.0));
+  for (int i = 0; i < 6; ++i) {   // 6 edges 25 ms apart while the motor creeps a few dozen steps
+    sim.sensor->inject(now_ns());
+    sleep_s(0.025);
+  }
+  CHECK(testing::wait_until([&] { return sim.rt->get_status()["sensor"]["rejected_edges"].get<long>() >= 5; }, 2.0));
+  json st = sim.rt->get_status();
+  CHECK(st["error"] == "");
+  CHECK(st["warning"].get<std::string>().find("microstepping") == std::string::npos);
+  CHECK(sim.rt->motor().is_running());
+  CHECK(sim.led->frames_rendered == 0);
+  sim.rt->stop();
+}
+
+TEST_CASE("motor-only test: the motor spins with the LED dark and no stall stop, and the sensor is still measured") {
+  Sim sim;
+  sim.rt->start_motor_test();
+  CHECK(sim.rt->state() == "motor test");
+  CHECK(sim.rt->motor_test());
+  CHECK_THROWS_AS(sim.rt->start(), std::invalid_argument);
+  CHECK_THROWS_AS(sim.rt->set_free_run(true), std::invalid_argument);
+  CHECK_THROWS_AS(sim.rt->run_microstep_test(), std::invalid_argument);
+  auto revs = [&] { return sim.rt->get_status()["bench"]["revolutions"].size(); };
+  CHECK(testing::wait_until([&] { return revs() >= 3; }, 6.0));
+  json b = sim.rt->get_status()["bench"];
+  CHECK(b["motor_test"] == true);
+  CHECK(b["revolutions"][0]["steps"].get<double>() == doctest::Approx(3200).epsilon(0.02));
+  CHECK(b["last_edges"].size() >= 3);
+  CHECK(sim.led->frames_rendered == 0);
+  CHECK(sim.led->blanked);
+  // no disk: no pulses, and still no stop or warning
+  sim.sensor->set_motor_coupled(false);
+  sleep_s(1.6);
+  json st = sim.rt->get_status();
+  CHECK(st["state"] == "motor test");
+  CHECK(st["error"] == "");
+  CHECK(st["warning"] == "");
+  CHECK(sim.rt->motor().is_running());
+  sim.rt->stop();
+  CHECK(sim.rt->state() == "idle");
+  CHECK_FALSE(sim.rt->motor_test());
+  CHECK_FALSE(sim.rt->motor().is_running());
+}
+
+TEST_CASE("sensor watch: with the motor stopped every edge is logged and hand-turned notches are accepted") {
+  Sim sim;
+  sim.sensor->mock_level = 1;
+  CHECK(sim.rt->get_status()["bench"]["sensor_open"] == false);
+  sim.rt->set_sensor_watch(true);
+  CHECK(testing::wait_until([&] { return sim.rt->get_status()["bench"]["sensor_open"] == true; }, 2.0));
+  CHECK(testing::wait_until([&] { return sim.rt->get_status()["bench"]["sensor_level"] == 1; }, 2.0));
+  for (int i = 0; i < 3; ++i) {   // three notches by hand, 300 ms apart, each with a 2 ms bounce
+    std::int64_t t = now_ns();
+    sim.sensor->inject(t);
+    sim.sensor->inject(t + 2'000'000);
+    sleep_s(0.3);
+  }
+  CHECK(testing::wait_until([&] { return sim.rt->get_status()["bench"]["edges_total"] == 6; }, 2.0));
+  json b = sim.rt->get_status()["bench"];
+  CHECK(b["edges_accepted"] == 3);
+  CHECK(b["revolutions"].size() == 2);
+  CHECK(b["revolutions"][0]["period_ms"].get<double>() == doctest::Approx(300).epsilon(0.1));
+  CHECK(b["revolutions"][0]["steps"] == 0);   // motor stopped
+  CHECK(b["last_edges"][0]["accepted"] == false);   // newest: the bounce
+  CHECK(b["recent"].size() == 6);
+  CHECK_FALSE(sim.rt->motor().is_running());
+  CHECK(sim.led->blanked);
+  sim.rt->set_sensor_watch(false);
+  CHECK(testing::wait_until([&] { return sim.rt->get_status()["bench"]["sensor_open"] == false; }, 2.0));
+}
+
+TEST_CASE("LED test: steady and blink light the LED alone, never alongside the normal run, and off blanks it") {
+  Sim sim;
+  sim.rt->set_led_test("steady", 0.4);
+  CHECK(sim.rt->led_test() == "steady");
+  CHECK(testing::wait_until([&] { return sim.led->frames_rendered > 10; }, 2.0));
+  CHECK_FALSE(sim.rt->motor().is_running());
+  CHECK(sim.led->last_stream()[0] == 102);
+  CHECK(sim.rt->get_status()["bench"]["led_test_left_s"].get<double>() > 25.0);
+  sim.rt->set_led_test("off");
+  CHECK(sim.led->blanked);
+  long n = sim.led->frames_rendered;
+  sleep_s(0.1);
+  CHECK(sim.led->frames_rendered <= n + 1);
+  // blink: lit about half the time
+  sim.rt->set_led_test("blink", 1.0);
+  int lit = 0, samples = 0;
+  for (double t0 = now_s(); now_s() - t0 < 1.2; sleep_s(0.02), ++samples) lit += sim.led->blanked ? 0 : 1;
+  CHECK(lit > samples / 5);
+  CHECK(lit < samples * 4 / 5);
+  // the normal run takes the LED over
+  sim.rt->start();
+  CHECK(sim.rt->led_test() == "off");
+  CHECK_THROWS_AS(sim.rt->set_led_test("steady"), std::invalid_argument);
+  sim.rt->stop();
+  // allowed together with the motor-only test
+  sim.rt->start_motor_test();
+  sim.rt->set_led_test("steady");
+  long before = sim.led->frames_rendered;
+  CHECK(testing::wait_until([&] { return sim.led->frames_rendered > before + 5; }, 2.0));
+  sim.rt->emergency_blank();
+  CHECK(sim.rt->led_test() == "off");
+  CHECK(sim.led->blanked);
+  CHECK_THROWS_AS(sim.rt->set_led_test("strobe"), std::invalid_argument);
 }
 
 namespace {

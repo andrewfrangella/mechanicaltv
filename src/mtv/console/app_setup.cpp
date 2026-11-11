@@ -190,6 +190,7 @@ json check_report(const Args& args) {
   const char* wayland = std::getenv("WAYLAND_DISPLAY");
   std::string led = env::lower(env::get("MTV_LED_OUTPUT"));
   if (led.empty()) led = args.spi_led ? "spi" : "gpio";
+  const json saved = load_console_settings(args.data);
   return {
       {"version", VERSION},
       {"toolkit", "Qt"},
@@ -199,8 +200,11 @@ json check_report(const Args& args) {
       {"ffprobe", proc::which("ffprobe")},
       {"v4l2_ctl", proc::which("v4l2-ctl")},
       {"motor_driver", env::get("MTV_MOTOR_DRIVER", "a4988")},
-      {"microsteps", env::get_int("MTV_MICROSTEPS", 16)},
-      {"ramp_rate_fps", ramp_rate_from_env()},
+      {"microsteps", saved.contains("microsteps") && saved["microsteps"].is_number_integer() ? saved["microsteps"].get<int>()
+                                                                                             : env::get_int("MTV_MICROSTEPS", 16)},
+      {"ramp_rate_fps", saved.contains("ramp_rate_fps") && saved["ramp_rate_fps"].is_number() ? saved["ramp_rate_fps"].get<double>()
+                                                                                              : ramp_rate_from_env()},
+      {"console_settings", (fs::path(args.data) / "settings.json").string()},
       {"start_fps", env::get_double("MTV_START_FPS", DEFAULT_START_FPS)},
       {"hardware_pwm", has_pwm},
       {"gpiochip", sysinfo::path_exists("/dev/gpiochip0")},
@@ -232,10 +236,51 @@ json check_report(const Args& args) {
   };
 }
 
+json load_console_settings(const std::string& data_dir) {
+  std::ifstream in(fs::path(data_dir) / "settings.json");
+  if (!in) return json::object();
+  json j = json::parse(in, nullptr, false);
+  return j.is_object() ? j : json::object();
+}
+
+bool save_console_settings(const std::string& data_dir, const json& patch, std::string* why) {
+  json all = load_console_settings(data_dir);
+  for (auto it = patch.begin(); it != patch.end(); ++it) all[it.key()] = it.value();
+  const fs::path file = fs::path(data_dir) / "settings.json";
+  const fs::path tmp = fs::path(data_dir) / "settings.json.tmp";
+  std::error_code ec;
+  fs::create_directories(file.parent_path(), ec);
+  {
+    std::ofstream out(tmp);
+    out << all.dump(2) << "\n";
+    if (!out) {
+      if (why) *why = "cannot write " + tmp.string();
+      return false;
+    }
+  }
+  fs::rename(tmp, file, ec);
+  if (ec) {
+    if (why) *why = "cannot replace " + file.string() + ": " + ec.message();
+    fs::remove(tmp, ec);
+    return false;
+  }
+  return true;
+}
+
+namespace {
+// The console's saved motor settings win over the environment.
+void apply_console_settings(const std::string& data_dir, ControllerOptions& hw) {
+  json saved = load_console_settings(data_dir);
+  if (saved.contains("microsteps") && saved["microsteps"].is_number_integer()) hw.microsteps = saved["microsteps"].get<int>();
+  if (saved.contains("ramp_rate_fps") && saved["ramp_rate_fps"].is_number()) hw.ramp_rate = saved["ramp_rate_fps"].get<double>();
+}
+}  // namespace
+
 std::unique_ptr<Studio> build_studio(Args& args, std::string* hardware_note) {
   StudioOptions o;
   args.data = usable_data_dir(args.data);
   o.root = args.data;
+  apply_console_settings(args.data, o.hardware);
   o.hdmi = {args.hdmi_device, args.hdmi_fit, args.hdmi_format, args.hdmi_edid, args.hdmi_backend, args.hdmi_bridge};
   o.hardware.motor_port = args.motor_port;
   o.hardware.opto_pin = args.opto_pin;

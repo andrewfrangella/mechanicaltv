@@ -140,10 +140,110 @@ TEST_CASE("the console window runs, refreshes, drives the engine and counts erro
       w.wait_idle();
       CHECK(studio->realtime().state() == "idle");
     }
+    // Motor settings chosen in the console are applied and saved for the next start.
+    w.action("microsteps", {{"value", 8}});
+    w.action("ramp", {{"fps_per_s", 1.5}});
+    w.wait_idle();
+    CHECK(studio->realtime().microsteps() == 8);
+    CHECK(studio->realtime().motor().ramp_rate() == doctest::Approx(1.5));
+    w.refresh_now();
+    CHECK(w.microsteps_selected() == 8);
+    CHECK(w.slider_label("ramp") == "1.5 FPS/s");
+    json saved = console::load_console_settings(data.str());
+    CHECK(saved["microsteps"] == 8);
+    CHECK(saved["ramp_rate_fps"].get<double>() == doctest::Approx(1.5));
     w.quit_console();
     CHECK(w.closing());
   }
   studio.reset();
+}
+
+TEST_CASE("the Tests tab runs the motor alone, shows the sensor, and lights the LED alone (offscreen)") {
+  testing::EnvGuard qpa("QT_QPA_PLATFORM", "offscreen");
+  testing::EnvGuard ramp("MTV_RAMP_RATE", "50");
+  testing::EnvGuard settle("MTV_ENABLE_SETTLE", "0");
+  int argc = 1;
+  char name[] = "mtv_tests";
+  char* argv[] = {name, nullptr};
+  QApplication app(argc, argv);
+  testing::TempDir data;
+  console::Args args;
+  args.data = data.str();
+  args.mock_hardware = true;
+  args.hdmi_device = data.str() + "/novideo";
+  std::string note;
+  auto studio = console::build_studio(args, &note);
+  {
+    console::ConsoleWindow w(*studio, false, "", "");
+    w.show();
+    w.resize(1400, 900);
+    w.show_tests_tab(true);
+    CHECK(w.tests_tab_shown());
+    w.refresh_now();
+    CHECK(w.test_text("motor").startsWith("Stopped"));
+    CHECK(w.test_text("level") == "SENSOR CLOSED");
+
+    w.action("motor_test");
+    w.wait_idle();
+    CHECK(studio->realtime().state() == "motor test");
+    CHECK(testing::wait_until([&] {
+      app.processEvents();
+      w.refresh_now();
+      return w.test_revolution_rows() >= 2;
+    }, 6.0));
+    CHECK(w.test_text("motor").startsWith("RUNNING"));
+    CHECK(w.pill_text("motor") == "MOTOR: MOTOR TEST");
+    CHECK(w.hud_text("lock") == "MOTOR TEST (LED OFF)");
+    CHECK(w.test_edge_rows() >= 2);
+    CHECK(w.test_text("counts").contains("edges seen"));
+    w.action("stop");
+    w.wait_idle();
+    CHECK(studio->realtime().state() == "idle");
+
+    w.action("led_test", {{"mode", "steady"}, {"level", 0.3}});
+    w.wait_idle();
+    w.refresh_now();
+    CHECK(w.test_text("led").startsWith("LED STEADY at 30%"));
+    w.action("led_test", {{"mode", "off"}});   // immediate, not queued
+    CHECK(studio->realtime().led_test() == "off");
+    w.refresh_now();
+    CHECK(w.test_text("led") == "LED off.");
+
+    w.action("sensor_watch", {{"on", true}});
+    w.wait_idle();
+    CHECK(testing::wait_until([&] {
+      w.refresh_now();
+      return w.test_text("level") != "SENSOR CLOSED";
+    }, 2.0));
+    CHECK(w.test_text("hint").contains("Turn the disk by hand"));
+    w.action("sensor_watch", {{"on", false}});
+    w.wait_idle();
+    w.quit_console();
+  }
+  studio.reset();
+}
+
+TEST_CASE("saved console settings override MTV_MICROSTEPS and MTV_RAMP_RATE at start") {
+  testing::EnvGuard ms("MTV_MICROSTEPS", "16");
+  testing::EnvGuard ramp("MTV_RAMP_RATE", "2");
+  testing::TempDir data;
+  CHECK(console::load_console_settings(data.str()).empty());
+  CHECK(console::save_console_settings(data.str(), {{"microsteps", 4}, {"other", "kept"}}));
+  CHECK(console::save_console_settings(data.str(), {{"ramp_rate_fps", 1.5}}));
+  json saved = console::load_console_settings(data.str());
+  CHECK(saved["other"] == "kept");
+  CHECK(saved["microsteps"] == 4);
+  console::Args args;
+  args.data = data.str();
+  args.mock_hardware = true;
+  args.hdmi_device = data.str() + "/novideo";
+  CHECK(console::check_report(args)["microsteps"] == 4);
+  std::string note;
+  auto studio = console::build_studio(args, &note);
+  CHECK(studio->realtime().microsteps() == 4);
+  CHECK(studio->realtime().motor().steps_per_rev() == 800);
+  CHECK(studio->realtime().motor().ramp_rate() == doctest::Approx(1.5));
+  studio->close();
 }
 
 #include <csignal>

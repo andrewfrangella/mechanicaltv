@@ -77,7 +77,7 @@ void MockMotorDriver::release() {
 
 json MockMotorDriver::telemetry() {
   return {{"driver", "MockMotorDriver"}, {"port", port},        {"step_count", static_cast<long long>(acct_.count())},
-          {"released", released_.load()}, {"connected", true},  {"steps_per_rev", steps_per_rev_},
+          {"released", released_.load()}, {"connected", true},  {"steps_per_rev", steps_per_rev_.load()},
           {"step_rate_hz", round_to(acct_.rate(), 1)}, {"mode", "simulated"}};
 }
 
@@ -151,13 +151,13 @@ void A4988PWMDriver::release() {
 json A4988PWMDriver::telemetry() {
   std::lock_guard<std::mutex> lock(lock_);
   return {{"driver", "A4988PWMDriver"},
-          {"microsteps", microsteps_},
-          {"steps_per_rev", 200 * microsteps_},
+          {"microsteps", microsteps_.load()},
+          {"steps_per_rev", 200 * microsteps_.load()},
           {"step_rate_hz", round_to(rate_, 1)},
           {"step_count", static_cast<long long>(acct_.count())},
           {"direction", direction_.load()},
           {"released", released_.load()},
-          {"mode", "1/" + std::to_string(microsteps_) + " microstep"},
+          {"mode", "1/" + std::to_string(microsteps_.load()) + " microstep"},
           {"pwm", pwm_->path()},
           {"pwm_period_ns", pwm_->period_ns()},
           {"connected", true}};
@@ -268,8 +268,9 @@ json AdafruitMotorHATDriver::telemetry() {
 }
 #endif
 
-std::unique_ptr<MotorDriver> create_motor_driver(int port, bool force_mock, std::string* note) {
-  const int mock_spr = 200 * std::max(1, env::get_int("MTV_MICROSTEPS", 16));
+std::unique_ptr<MotorDriver> create_motor_driver(int port, bool force_mock, std::string* note, int microsteps) {
+  const int ms = microsteps > 0 ? microsteps : std::max(1, env::get_int("MTV_MICROSTEPS", 16));
+  const int mock_spr = 200 * ms;
   if (force_mock || env::flag("MTV_MOCK_HARDWARE")) return std::make_unique<MockMotorDriver>(port, mock_spr);
   // The installer's default is the A4988; the HAT must be asked for (MTV_MOTOR_DRIVER=hat).
   std::string kind = env::lower(env::trim(env::get("MTV_MOTOR_DRIVER", "a4988")));
@@ -277,7 +278,7 @@ std::unique_ptr<MotorDriver> create_motor_driver(int port, bool force_mock, std:
   if (kind == "a4988" || kind == "stepdir" || kind == "drv8825" || kind == "tmc2209") {
     // Errors propagate: with a STEP/DIR driver selected the HAT has no motor attached.
     return std::make_unique<A4988PWMDriver>(env::get_int("MTV_DIR_GPIO", 23), env::get_int("MTV_ENABLE_GPIO", 24),
-                                            env::get_int("MTV_MICROSTEPS", 16), env::get_int("MTV_MOTOR_DIRECTION", 1),
+                                            ms, env::get_int("MTV_MOTOR_DIRECTION", 1),
                                             env::get("MTV_PWM_CHIP"));
   }
   if (kind != "hat" && kind != "adafruit") {
@@ -379,6 +380,14 @@ void MotorController::stop() {
 
 void MotorController::set_target_fps(double fps) { target_fps_ = std::clamp(fps, MIN_FPS, MAX_FPS); }
 
+bool MotorController::set_microsteps(int microsteps) {
+  std::lock_guard<std::mutex> lock(lock_);
+  if (running_) return false;
+  return driver_->set_microsteps(microsteps);
+}
+
+void MotorController::set_ramp_rate(double fps_per_s) { ramp_rate_ = std::clamp(fps_per_s, MIN_RAMP_RATE, MAX_RAMP_RATE); }
+
 void MotorController::rate_loop() {
   const int spr = driver_->steps_per_rev();
   try {
@@ -473,6 +482,7 @@ json MotorController::telemetry() {
           {"current_fps", round_to(current_fps_, 2)},
           {"current_rpm", round_to(current_fps_ * 60.0, 1)},
           {"ramp_rate_fps", ramp_rate_.load()},
+          {"microsteps", driver_->microsteps()},
           {"start_fps", start_fps_},
           {"trim_us", 0.0},
           {"driver", drv}};

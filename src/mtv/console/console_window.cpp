@@ -11,6 +11,7 @@
 #include <QKeyEvent>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cmath>
@@ -19,6 +20,7 @@
 #include "mtv/common/clock.h"
 #include "mtv/common/constants.h"
 #include "mtv/common/sysinfo.h"
+#include "mtv/console/app_setup.h"
 #include "mtv/console/debug_window.h"
 #include "mtv/console/frame_view.h"
 #include "mtv/console/palette.h"
@@ -50,6 +52,10 @@ QLabel#eyebrow { color: %6; font-family: "DejaVu Sans Mono", Menlo, monospace; f
 QLabel#title { font-size: 22pt; font-weight: bold; background: transparent; }
 QLabel#heading { color: %7; font-size: 12pt; font-weight: bold; }
 QLabel#muted { color: %6; font-family: "DejaVu Sans Mono", Menlo, monospace; font-size: 9pt; }
+QTabWidget::pane { border: 0; }
+QTabBar::tab { background: %2; color: %6; font-family: "DejaVu Sans Mono", Menlo, monospace; font-size: 10pt; padding: 8px 22px; border: 1px solid %4; border-bottom: 0; border-top-left-radius: 3px; border-top-right-radius: 3px; margin-right: 4px; }
+QTabBar::tab:selected { background: %3; color: %7; font-weight: bold; }
+QLabel#big { font-family: "DejaVu Sans Mono", Menlo, monospace; font-size: 18pt; font-weight: bold; }
 QLabel#value { font-family: "DejaVu Sans Mono", Menlo, monospace; font-size: 13pt; font-weight: bold; }
 QLabel#notice { color: %7; font-size: 9pt; background: transparent; }
 QLabel#pill { font-family: "DejaVu Sans Mono", Menlo, monospace; font-size: 9pt; padding: 4px 12px; border: 1px solid %4; border-radius: 3px; background: %1; }
@@ -180,6 +186,73 @@ void ConsoleWindow::set_pill(QLabel* p, const QString& text, const std::string& 
   if (p->text() != text) p->setText(text);
   QString style = QString("color: %1; border-color: %1;").arg(c);
   if (p->styleSheet() != style) p->setStyleSheet(style);
+}
+
+namespace {
+constexpr int MICROSTEP_CHOICES[] = {1, 2, 4, 8, 16, 32, 64};
+constexpr double RAMP_SLIDER_MAX = 10.0;   // FPS/s; MTV_RAMP_RATE allows up to 50 for the bench
+QString microstep_label(int n) { return QString("1/%1  (%2 steps/rev)").arg(n).arg(200 * n); }
+
+// Index edges of the last 5 s on a time line, newest at the right: accepted edges tall and green,
+// rejected ones (bounce, noise) short and red.
+class EdgeStrip : public QWidget {
+ public:
+  static constexpr double SPAN_S = 5.0;
+  EdgeStrip() { setMinimumHeight(70); }
+  void set_edges(const json& recent) {
+    edges_.clear();
+    for (const auto& e : recent) edges_.emplace_back(e.value("age_s", 0.0), e.value("accepted", false));
+    update();
+  }
+
+ protected:
+  void paintEvent(QPaintEvent*) override {
+    QPainter p(this);
+    const QRect r = rect().adjusted(24, 1, -24, -16);   // room for the end labels
+    p.fillRect(rect(), QColor(color::PANEL_ALT));
+    p.setPen(QColor(color::BORDER));
+    p.drawRect(r);
+    p.setPen(QColor(color::MUTED));
+    QFont f = p.font();
+    f.setPointSize(8);
+    p.setFont(f);
+    for (int s = 0; s <= 5; ++s) {
+      int x = r.right() - static_cast<int>(r.width() * s / SPAN_S);
+      p.drawLine(x, r.bottom(), x, r.bottom() + 3);
+      p.drawText(QRect(x - 30, r.bottom() + 2, 60, 14), Qt::AlignCenter, s == 0 ? QString("now") : QString("-%1 s").arg(s));
+    }
+    for (const auto& [age, accepted] : edges_) {
+      if (age > SPAN_S) continue;
+      int x = r.right() - static_cast<int>(r.width() * age / SPAN_S);
+      p.setPen(QPen(QColor(accepted ? color::GOOD : color::DANGER), accepted ? 3 : 1));
+      int top = accepted ? r.top() + 4 : r.top() + r.height() / 2;
+      p.drawLine(x, top, x, r.bottom() - 1);
+    }
+  }
+
+ private:
+  std::vector<std::pair<double, bool>> edges_;
+};
+}  // namespace
+
+void ConsoleWindow::sync_microsteps_box(int microsteps) {
+  int idx = microsteps_box_->findData(microsteps);
+  if (idx < 0) {
+    microsteps_box_->addItem(microstep_label(microsteps), microsteps);
+    idx = microsteps_box_->count() - 1;
+  }
+  if (idx == microsteps_box_->currentIndex()) return;
+  syncing_ = true;
+  microsteps_box_->setCurrentIndex(idx);
+  syncing_ = false;
+}
+
+int ConsoleWindow::microsteps_selected() const { return microsteps_box_->currentData().toInt(); }
+
+void ConsoleWindow::save_motor_settings() {
+  std::string why;
+  json patch = {{"microsteps", rt_.microsteps()}, {"ramp_rate_fps", rt_.motor().ramp_rate()}};
+  if (!save_console_settings(studio_.root(), patch, &why)) log::warning("motor settings not saved: " + why);
 }
 
 QSlider* ConsoleWindow::slider(double from, double to, double step, std::function<void(double)> commit, std::function<void(double)> show) {
@@ -333,7 +406,14 @@ void ConsoleWindow::build() {
     hud_[items[i].first] = value;
   }
   left->addWidget(hud_panel, 3, 0, 1, 2);
-  root->addLayout(left, 1, 0);
+  tabs_ = new QTabWidget();
+  auto* console_page = new QWidget();
+  auto* page = new QGridLayout(console_page);
+  page->setContentsMargins(0, 10, 0, 0);
+  page->setHorizontalSpacing(24);
+  page->setColumnStretch(0, 3);
+  page->setColumnStretch(1, 2);
+  page->addLayout(left, 0, 0);
 
   // Right: controls
   auto* right = new QVBoxLayout();
@@ -366,7 +446,11 @@ void ConsoleWindow::build() {
   };
   ctl->addWidget(new QLabel("Speed"), 2, 0);
   speed_val_ = value_label();
-  speed_ = slider(MIN_FPS, MAX_FPS, 0.1, [this](double v) { action("speed", {{"fps", v}}); },
+  speed_ = slider(MIN_FPS, MAX_FPS, 0.1,
+                  [this](double v) {
+                    action("speed", {{"fps", v}});
+                    if (test_speed_) set_slider(test_speed_, v);
+                  },
                   [this](double v) { speed_val_->setText(QString("%1 FPS (%2 RPM)").arg(v, 0, 'f', 1).arg(std::lround(v * 60))); });
   ctl->addWidget(speed_, 2, 1);
   ctl->addWidget(speed_val_, 2, 2);
@@ -386,13 +470,36 @@ void ConsoleWindow::build() {
     free_run_changed_at_ = now_s();
     action("free_run", {{"enabled", on}});
   });
+  ctl->addWidget(new QLabel("Spin-up ramp"), 5, 0);
+  ramp_val_ = value_label();
+  ramp_ = slider(MIN_RAMP_RATE, RAMP_SLIDER_MAX, 0.1, [this](double v) { action("ramp", {{"fps_per_s", v}}); },
+                 [this](double v) { ramp_val_->setText(QString("%1 FPS/s").arg(v, 0, 'f', 1)); });
+  ramp_->setToolTip("How fast the disk accelerates after the coils energise, in frames per second gained each second. "
+                    "Lower it if a heavy disk slips or stalls while spinning up. Saved for the next start of the console.");
+  ctl->addWidget(ramp_, 5, 1);
+  ctl->addWidget(ramp_val_, 5, 2);
+  set_slider(ramp_, std::min(RAMP_SLIDER_MAX, rt_.motor().ramp_rate()));
+
+  ctl->addWidget(new QLabel("Microsteps"), 6, 0);
   auto* test_row = new QHBoxLayout();
+  microsteps_box_ = new QComboBox();
+  for (int n : MICROSTEP_CHOICES) microsteps_box_->addItem(microstep_label(n), n);
+  microsteps_box_->setToolTip("The driver's microstep mode, set by its MS jumpers (A4988: MS1, MS2 and MS3 all high is 1/16). "
+                              "The motor is commanded 200 x this many steps per revolution. Change it with the motor "
+                              "stopped; it is saved for the next start of the console.");
+  sync_microsteps_box(rt_.microsteps());
+  connect(microsteps_box_, &QComboBox::currentIndexChanged, this, [this](int) {
+    if (syncing_) return;
+    microsteps_changed_at_ = now_s();
+    action("microsteps", {{"value", microsteps_box_->currentData().toInt()}});
+  });
   btn_test_ = new QPushButton("Check microstepping");
   btn_test_->setToolTip("Spins the disk slowly for up to 40 s and counts motor steps between two index pulses, "
-                        "to confirm the driver's microstep jumpers match MTV_MICROSTEPS.");
+                        "to confirm the driver's microstep jumpers match the Microsteps setting.");
+  test_row->addWidget(microsteps_box_);
   test_row->addWidget(btn_test_);
   test_row->addStretch(1);
-  ctl->addLayout(test_row, 5, 0, 1, 3);
+  ctl->addLayout(test_row, 6, 1, 1, 2);
   connect(btn_test_, &QPushButton::clicked, this, [this] { action("microstep_test"); });
   right->addWidget(ctl_panel);
 
@@ -476,7 +583,12 @@ void ConsoleWindow::build() {
   lib_status_->setWordWrap(true);
   lib->addWidget(lib_status_, 4, 0);
   right->addWidget(lib_panel, 1);
-  root->addLayout(right, 1, 1);
+  page->addLayout(right, 0, 1);
+  tabs_->addTab(console_page, "Console");
+  tabs_->addTab(build_tests_page(), "Tests");
+  tabs_->setFocusPolicy(Qt::NoFocus);
+  tabs_->tabBar()->setFocusPolicy(Qt::NoFocus);
+  root->addWidget(tabs_, 1, 0, 1, 2);
 
   // Footer
   auto* footer = new QHBoxLayout();
@@ -493,16 +605,276 @@ void ConsoleWindow::build() {
   for (auto* b : central->findChildren<QAbstractButton*>()) b->setFocusPolicy(Qt::NoFocus);
 }
 
+// ---------------------------------------------------------------- tests tab
+
+QWidget* ConsoleWindow::build_tests_page() {
+  auto* page = new QWidget();
+  auto* grid = new QGridLayout(page);
+  grid->setContentsMargins(0, 10, 0, 0);
+  grid->setHorizontalSpacing(24);
+  grid->setVerticalSpacing(12);
+  grid->setColumnStretch(0, 2);
+  grid->setColumnStretch(1, 3);
+  auto value_label = [] {
+    auto* l = new QLabel("");
+    l->setObjectName("muted");
+    l->setMinimumWidth(150);
+    return l;
+  };
+  auto note = [](const QString& text) {
+    auto* l = new QLabel(text);
+    l->setObjectName("muted");
+    l->setWordWrap(true);
+    return l;
+  };
+
+  // Motor only
+  auto* motor_panel = panel();
+  auto* m = new QGridLayout(motor_panel);
+  m->setContentsMargins(14, 14, 14, 14);
+  m->setColumnStretch(1, 1);
+  m->addWidget(heading("Motor only"), 0, 0, 1, 3);
+  m->addWidget(note("Spins the motor at the speed below with the LED kept off and no stall checks: the motor runs "
+                    "whatever the sensor sees. The index sensor is still read, so the panel on the right shows how it "
+                    "picks up the notch."), 1, 0, 1, 3);
+  auto* mb = new QHBoxLayout();
+  btn_motor_test_ = new QPushButton(QStringLiteral("▶  Run motor only"));
+  btn_motor_test_->setObjectName("primary");
+  btn_motor_test_stop_ = new QPushButton(QStringLiteral("■  Stop motor"));
+  mb->addWidget(btn_motor_test_);
+  mb->addWidget(btn_motor_test_stop_);
+  mb->addStretch(1);
+  m->addLayout(mb, 2, 0, 1, 3);
+  connect(btn_motor_test_, &QPushButton::clicked, this, [this] { action("motor_test"); });
+  connect(btn_motor_test_stop_, &QPushButton::clicked, this, [this] { action("stop"); });
+  m->addWidget(new QLabel("Speed"), 3, 0);
+  test_speed_val_ = value_label();
+  test_speed_ = slider(MIN_FPS, MAX_FPS, 0.1,
+                       [this](double v) {
+                         action("speed", {{"fps", v}});
+                         set_slider(speed_, v);
+                       },
+                       [this](double v) {
+                         test_speed_val_->setText(QString("%1 FPS (%2 RPM)").arg(v, 0, 'f', 1).arg(std::lround(v * 60)));
+                       });
+  m->addWidget(test_speed_, 3, 1);
+  m->addWidget(test_speed_val_, 3, 2);
+  set_slider(test_speed_, rt_.target_fps());
+  test_motor_status_ = note("");
+  m->addWidget(test_motor_status_, 4, 0, 1, 3);
+  grid->addWidget(motor_panel, 0, 0);
+
+  // LED only
+  auto* led_panel = panel();
+  auto* l = new QGridLayout(led_panel);
+  l->setContentsMargins(14, 14, 14, 14);
+  l->setColumnStretch(1, 1);
+  l->addWidget(heading("LED only"), 0, 0, 1, 3);
+  l->addWidget(note(log::format("Lights the LED on its own, steady or blinking once a second, with the motor stopped "
+                                "or in the motor-only test. It switches itself off after %.0f s.",
+                                RealtimeController::LED_TEST_MAX_S).c_str()),
+               1, 0, 1, 3);
+  auto* lb = new QHBoxLayout();
+  btn_led_steady_ = new QPushButton("Steady");
+  btn_led_blink_ = new QPushButton("Blink");
+  btn_led_off_ = new QPushButton("LED off");
+  btn_led_off_->setObjectName("danger");
+  lb->addWidget(btn_led_steady_);
+  lb->addWidget(btn_led_blink_);
+  lb->addWidget(btn_led_off_);
+  lb->addStretch(1);
+  l->addLayout(lb, 2, 0, 1, 3);
+  auto led_level = [this] { return slider_value(test_led_level_) / 100.0; };
+  connect(btn_led_steady_, &QPushButton::clicked, this, [this, led_level] { action("led_test", {{"mode", "steady"}, {"level", led_level()}}); });
+  connect(btn_led_blink_, &QPushButton::clicked, this, [this, led_level] { action("led_test", {{"mode", "blink"}, {"level", led_level()}}); });
+  connect(btn_led_off_, &QPushButton::clicked, this, [this] { action("led_test", {{"mode", "off"}}); });
+  l->addWidget(new QLabel("Level"), 3, 0);
+  test_led_level_val_ = value_label();
+  test_led_level_ = slider(1, 100, 1,
+                           [this](double v) {
+                             if (rt_.led_test() != "off") action("led_test", {{"mode", rt_.led_test()}, {"level", v / 100.0}});
+                           },
+                           [this](double v) { test_led_level_val_->setText(QString("%1%").arg(std::lround(v))); });
+  l->addWidget(test_led_level_, 3, 1);
+  l->addWidget(test_led_level_val_, 3, 2);
+  set_slider(test_led_level_, 50);
+  test_led_status_ = note("");
+  l->addWidget(test_led_status_, 4, 0, 1, 3);
+  grid->addWidget(led_panel, 1, 0);
+  grid->setRowStretch(2, 1);
+
+  // Index sensor
+  auto* sensor_panel = panel();
+  auto* s = new QGridLayout(sensor_panel);
+  s->setContentsMargins(14, 14, 14, 14);
+  s->setColumnStretch(0, 1);
+  s->setColumnStretch(1, 1);
+  s->addWidget(heading(QString("Index sensor (GPIO %1)").arg(rt_.sensor().pin)), 0, 0, 1, 2);
+  sensor_watch_box_ = new QCheckBox("Watch the sensor with the motor stopped (turn the disk by hand)");
+  connect(sensor_watch_box_, &QCheckBox::clicked, this, [this](bool on) { action("sensor_watch", {{"on", on}}); });
+  s->addWidget(sensor_watch_box_, 1, 0, 1, 2);
+  test_sensor_level_ = new QLabel(QStringLiteral("—"));
+  test_sensor_level_->setObjectName("big");
+  s->addWidget(test_sensor_level_, 2, 0);
+  test_sensor_counts_ = note("");
+  s->addWidget(test_sensor_counts_, 2, 1);
+  auto* strip_label = new QLabel("EDGES, LAST 5 S · TALL GREEN = ACCEPTED NOTCH · SHORT RED = REJECTED (BOUNCE, NOISE)");
+  strip_label->setObjectName("eyebrow");
+  s->addWidget(strip_label, 3, 0, 1, 2);
+  edge_strip_ = new EdgeStrip();
+  s->addWidget(edge_strip_, 4, 0, 1, 2);
+  test_sensor_hint_ = new QLabel("");
+  test_sensor_hint_->setObjectName("notice");
+  test_sensor_hint_->setWordWrap(true);
+  s->addWidget(test_sensor_hint_, 5, 0, 1, 2);
+  auto make_table = [](const QStringList& headers) {
+    auto* t = new QTableWidget(0, headers.size());
+    t->setHorizontalHeaderLabels(headers);
+    t->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    t->verticalHeader()->setVisible(false);
+    t->setSelectionMode(QAbstractItemView::NoSelection);
+    t->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    t->setFocusPolicy(Qt::NoFocus);
+    t->setMinimumHeight(180);
+    return t;
+  };
+  auto* el = new QLabel("LAST EDGES (NEWEST FIRST)");
+  el->setObjectName("eyebrow");
+  auto* rl = new QLabel("REVOLUTIONS BETWEEN ACCEPTED NOTCHES");
+  rl->setObjectName("eyebrow");
+  s->addWidget(el, 6, 0);
+  s->addWidget(rl, 6, 1);
+  edges_table_ = make_table({"AGO", "GAP", "MOTOR STEPS", "RESULT"});
+  revs_table_ = make_table({"PERIOD", "SPEED", "STEPS / REV", "EXPECTED"});
+  s->addWidget(edges_table_, 7, 0);
+  s->addWidget(revs_table_, 7, 1);
+  s->setRowStretch(7, 1);
+  grid->addWidget(sensor_panel, 0, 1, 3, 1);
+  return page;
+}
+
+QString ConsoleWindow::test_text(const std::string& key) const {
+  if (key == "motor") return test_motor_status_->text();
+  if (key == "led") return test_led_status_->text();
+  if (key == "level") return test_sensor_level_->text();
+  if (key == "counts") return test_sensor_counts_->text();
+  if (key == "hint") return test_sensor_hint_->text();
+  return {};
+}
+
+void ConsoleWindow::update_tests(const json& rt) {
+  const json& b = rt.contains("bench") ? rt["bench"] : json::object();
+  const std::string state = rt.value("state", "idle");
+  const bool motor_test = b.value("motor_test", false);
+  const bool normal_run = state != "idle" && state != "error" && state != "testing" && !motor_test;
+  const bool free_run = rt.value("free_run", false);
+  const int spr = 200 * rt.value("microsteps", 16);
+  btn_motor_test_->setEnabled(state == "idle" || state == "error");
+  btn_motor_test_->setEnabled(btn_motor_test_->isEnabled() && !free_run);
+  btn_motor_test_stop_->setEnabled(state != "idle" && state != "error");
+  const json motor = rt.contains("motor") ? rt["motor"] : json::object();
+  if (motor_test) {
+    test_motor_status_->setText(log::format("RUNNING · %.2f FPS commanded (%.0f RPM) · 1/%d, %d steps per revolution · LED off",
+                                            motor.value("current_fps", 0.0), motor.value("current_fps", 0.0) * 60,
+                                            spr / 200, spr).c_str());
+  } else if (normal_run) {
+    test_motor_status_->setText("The motor is in the normal run (started from the Console tab). Stop it to use the motor-only test.");
+  } else if (free_run) {
+    test_motor_status_->setText("Free-run is on (Console tab): it lights the LED, so the motor-only test is unavailable.");
+  } else {
+    test_motor_status_->setText(log::format("Stopped · coils released · microstepping 1/%d (set on the Console tab)", spr / 200).c_str());
+  }
+  if (!dragging(test_speed_) && std::fabs(slider_value(test_speed_) - rt.value("target_fps", 10.0)) > 0.05)
+    set_slider(test_speed_, rt.value("target_fps", 10.0));
+
+  const std::string led = b.value("led_test", "off");
+  const bool led_allowed = !normal_run && !free_run;
+  btn_led_steady_->setEnabled(led_allowed);
+  btn_led_blink_->setEnabled(led_allowed);
+  if (led != "off" && !dragging(test_led_level_)) {
+    const double pct = b.value("led_test_level", 0.5) * 100;
+    if (std::fabs(slider_value(test_led_level_) - pct) > 0.5) set_slider(test_led_level_, pct);
+  }
+  if (led != "off") {
+    test_led_status_->setText(log::format("LED %s at %.0f%% · switches off in %.0f s", led == "steady" ? "STEADY" : "BLINKING",
+                                          b.value("led_test_level", 0.0) * 100, b.value("led_test_left_s", 0.0)).c_str());
+  } else {
+    test_led_status_->setText(led_allowed ? "LED off." : "LED test unavailable while the normal run or free-run drives the LED.");
+  }
+
+  const bool watch = b.value("sensor_watch", false);
+  if (sensor_watch_box_->isChecked() != watch) sensor_watch_box_->setChecked(watch);
+  const int level = b.value("sensor_level", -1);
+  const bool open = b.value("sensor_open", false);
+  QString level_text = !open ? QString("SENSOR CLOSED") : level < 0 ? QString("LEVEL UNKNOWN") : level ? QString("LINE HIGH") : QString("LINE LOW");
+  if (test_sensor_level_->text() != level_text) test_sensor_level_->setText(level_text);
+  test_sensor_level_->setStyleSheet(QString("color: %1;").arg(!open || level < 0 ? color::MUTED : level ? color::ACCENT : color::TEXT));
+  const long total = b.value("edges_total", 0L), shown = b.value("edges_shown", 0L), accepted = b.value("edges_accepted", 0L);
+  const long per_s = b.value("edges_last_second", 0L);
+  test_sensor_counts_->setText(log::format("%ld edges seen · %ld of the last %ld accepted · %ld in the last second",
+                                           total, accepted, shown, per_s).c_str());
+  static_cast<EdgeStrip*>(edge_strip_)->set_edges(b.value("recent", json::array()));
+
+  QString hint;
+  const double fps = motor.value("current_fps", 0.0);
+  if (!open) {
+    hint = "Start the motor-only test, or tick the box above, to read the sensor.";
+  } else if (per_s > 20 && (fps <= 0 || per_s > 3 * fps + 5)) {
+    hint = "Far more edges than revolutions: the sensor output is flickering. Usually the notch edge sits in the beam "
+           "(turn the disk a little) or the signal picks up noise from the motor wiring.";
+  } else if (motor_test && fps > 0.5 && total == 0) {
+    hint = "No edges while the motor turns: check that the disk is fitted, the notch passes through the sensor slot, "
+           "and the sensor wiring.";
+  } else if (watch && !motor_test && total == 0) {
+    hint = "Turn the disk by hand: each pass of the notch should add one tall green mark.";
+  }
+  if (test_sensor_hint_->text() != hint) test_sensor_hint_->setText(hint);
+
+  auto fill = [](QTableWidget* t, const json& rows, const std::function<QStringList(const json&)>& cells) {
+    t->setRowCount(static_cast<int>(rows.size()));
+    for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+      QStringList c = cells(rows[i]);
+      for (int j = 0; j < c.size(); ++j) {
+        auto* item = t->item(i, j);
+        if (!item) t->setItem(i, j, item = new QTableWidgetItem());
+        if (item->text() != c[j]) item->setText(c[j]);
+      }
+    }
+  };
+  fill(edges_table_, b.value("last_edges", json::array()), [](const json& e) {
+    QString dt = e.contains("dt_ms") ? QString("%1 ms").arg(e["dt_ms"].get<double>(), 0, 'f', 1) : QString("—");
+    QString st = e.contains("steps") ? QString::number(e["steps"].get<double>(), 'f', 0) : QString("—");
+    return QStringList{QString("%1 s").arg(e.value("age_s", 0.0), 0, 'f', 1), dt, st,
+                       e.value("accepted", false) ? QString("notch") : QString("rejected")};
+  });
+  fill(revs_table_, b.value("revolutions", json::array()), [spr](const json& r) {
+    const double steps = r.value("steps", 0.0);
+    QString expected = steps <= 0 ? QString("motor stopped")
+                       : std::fabs(steps - spr) / spr <= 0.08 ? QString("%1 ✓").arg(spr)
+                                                               : QString("%1 ✗ (%2x)").arg(spr).arg(steps / spr, 0, 'f', 2);
+    return QStringList{QString("%1 ms").arg(r.value("period_ms", 0.0), 0, 'f', 1),
+                       QString("%1 FPS").arg(r.value("fps", 0.0), 0, 'f', 2), QString::number(steps, 'f', 0), expected};
+  });
+}
+
 // ---------------------------------------------------------------- actions (worker thread)
 
 void ConsoleWindow::action(const std::string& name, json params) {
+  if (name == "led_test" && params.value("mode", "") == "off") {
+    // Like stop: switching the LED off never waits behind a slow job.
+    log::info("action led_test off");
+    rt_.set_led_test("off");
+    return;
+  }
   if (name == "emergency_blank" || name == "stop") {
     // Safety actions never wait behind a slow job (a microstep check, a source switch, an import):
     // they run now, on this thread, and queued work that would restart things is dropped.
     {
       std::lock_guard<std::mutex> lock(jobs_lock_);
       if (name == "emergency_blank") jobs_.clear();
-      else jobs_.erase(std::remove_if(jobs_.begin(), jobs_.end(), [](const auto& j) { return j.first == "start"; }), jobs_.end());
+      else jobs_.erase(std::remove_if(jobs_.begin(), jobs_.end(),
+                                      [](const auto& j) { return j.first == "start" || j.first == "motor_test"; }),
+                       jobs_.end());
     }
     log::info("action " + name);
     try {
@@ -552,6 +924,13 @@ void ConsoleWindow::job_loop() {
     try {
       if (name == "start") {
         rt_.start();
+      } else if (name == "motor_test") {
+        rt_.start_motor_test();
+        notice("Motor-only test: the motor spins with the LED off and no stall checks. Watch the index sensor panel.");
+      } else if (name == "sensor_watch") {
+        rt_.set_sensor_watch(p.at("on").get<bool>());
+      } else if (name == "led_test") {
+        rt_.set_led_test(p.at("mode").get<std::string>(), p.value("level", 0.5));
       } else if (name == "speed") {
         rt_.set_target_fps(p.at("fps").get<double>());
       } else if (name == "free_run") {
@@ -585,6 +964,15 @@ void ConsoleWindow::job_loop() {
       } else if (name == "delete") {
         studio_.library().remove(p.at("id"));
         notice("Clip deleted.");
+      } else if (name == "microsteps") {
+        int n = p.at("value").get<int>();
+        rt_.set_microsteps(n);
+        save_motor_settings();
+        notice(log::format("Microstepping set to 1/%d (%d steps per revolution). Run Check microstepping to confirm the "
+                           "driver's MS jumpers agree.", n, 200 * n));
+      } else if (name == "ramp") {
+        rt_.set_ramp_rate(p.at("fps_per_s").get<double>());
+        save_motor_settings();
       } else if (name == "microstep_test") {
         notice("Microstep check running: the disk turns slowly for up to 40 s…");
         json r = rt_.run_microstep_test();
@@ -593,6 +981,7 @@ void ConsoleWindow::job_loop() {
         studio_.close();
       }
     } catch (const std::exception& exc) {
+      if (name == "microsteps") microsteps_changed_at_ = 0;   // the selector snaps back to the real setting
       notice(name + ": " + exc.what());
       log::error("action " + name + ": " + exc.what());
     }
@@ -617,7 +1006,8 @@ void ConsoleWindow::keyPressEvent(QKeyEvent* e) {
   else if (k == Qt::Key_Space) {
     QWidget* f = QApplication::focusWidget();
     if (qobject_cast<QComboBox*>(f) || qobject_cast<QSlider*>(f)) return QMainWindow::keyPressEvent(e);
-    action(rt_.state() != "idle" && rt_.state() != "error" ? "stop" : "start");
+    const bool moving = rt_.state() != "idle" && rt_.state() != "error";
+    action(moving ? "stop" : tests_tab_shown() ? "motor_test" : "start");
   } else {
     QMainWindow::keyPressEvent(e);
   }
@@ -771,8 +1161,9 @@ void ConsoleWindow::tick() {
     if (tick_count_++ % HUD_EVERY == 0) {
       json status = rt_.get_status();
       update_hud(status);
+      update_tests(status);
       std::string st = status.value("state", "idle");
-      if ((st == "locked" || st == "running" || st == "ramping") && now_s() - last_summary_at_ >= 5.0) {
+      if ((st == "locked" || st == "running" || st == "ramping" || st == "motor test") && now_s() - last_summary_at_ >= 5.0) {
         last_summary_at_ = now_s();
         const json& sn = status["sensor"];
         log::info(log::format("index: %.2f FPS, period %.3f ms, jitter %.3f ms (rms %.3f), %.0f steps/rev, %s, LED lead-in %.0f us, late pixels %ld",
@@ -782,6 +1173,7 @@ void ConsoleWindow::tick() {
                               status["realtime"].value("late_pixels", 0L)));
       }
       std::string err = status.value("error", "");
+      if (err.empty()) err = status.value("warning", "");   // index problem while the motor keeps running
       if (!err.empty() && err != last_error_) notice_label_->setText(QString::fromStdString(err));
       last_error_ = err;
       if (now_s() - last_library_at_ >= LIBRARY_REFRESH_S) {
@@ -821,7 +1213,7 @@ void ConsoleWindow::update_hud(const json& rt) {
   const bool hw = studio_.hardware_enabled();
   set_pill(pill_hw_, hw ? "REALTIME HARDWARE" : "SIMULATION", hw ? "live" : "danger");
   QString st = QString::fromStdString(state).toUpper();
-  set_pill(pill_motor_, "MOTOR: " + (state == "error" ? QString("STALLED") : st), state);
+  set_pill(pill_motor_, "MOTOR: " + (state == "error" ? QString("STALLED") : st), state == "motor test" ? "testing" : state);
   if (free_run) set_pill(pill_sync_, "SYNC: FREE-RUN", "free-run");
   else set_pill(pill_sync_, QString("SYNC: %1").arg(locked ? "LOCKED" : "UNLOCKED"), locked ? "locked" : (state == "idle" || state == "error" ? "idle" : "ramping"));
   if (free_run_box_->isChecked() != free_run && now_s() - free_run_changed_at_ > 3.0) free_run_box_->setChecked(free_run);
@@ -829,11 +1221,22 @@ void ConsoleWindow::update_hud(const json& rt) {
   btn_start_->setEnabled(!moving);
   btn_stop_->setEnabled(moving);
   btn_test_->setEnabled(!moving && !free_run);
+  microsteps_box_->setEnabled(!moving);
+  if (now_s() - microsteps_changed_at_ > 3.0) sync_microsteps_box(rt.value("microsteps", rt_.microsteps()));
+  if (!dragging(ramp_)) {
+    double ramp = std::min(RAMP_SLIDER_MAX, rt.value("ramp_rate_fps", rt_.motor().ramp_rate()));
+    if (std::fabs(ramp - slider_value(ramp_)) > 0.05) set_slider(ramp_, ramp);
+  }
 
   hud_["target"]->setText(QString("%1 RPM (%2 FPS)").arg(std::lround(rt.value("target_rpm", 0.0))).arg(rt.value("target_fps", 0.0), 0, 'f', 1));
   hud_["measured"]->setText(QString("%1 RPM").arg(rt.value("measured_rpm", 0.0), 0, 'f', 1));
+  const std::string warning = rt.value("warning", std::string());
+  const bool no_notch = warning.rfind("No index pulse", 0) == 0;
+  const bool slipping = !warning.empty() && !no_notch;
   QString lock_text = free_run ? "FREE-RUN CLOCK" : state == "testing" ? "MICROSTEP CHECK" : state == "error" ? "STALLED"
-                    : locked ? "LOCKED (±3%)" : state == "idle" ? "STANDBY" : "ACQUIRING";
+                    : state == "motor test" ? "MOTOR TEST (LED OFF)"
+                    : locked ? "LOCKED (±3%)" : state == "idle" ? "STANDBY" : no_notch ? "NO NOTCH (LED OFF)"
+                    : slipping ? "SLIPPING (SENSOR-TIMED)" : "ACQUIRING";
   hud_["lock"]->setText(lock_text);
   const json& sensor = rt["sensor"];
   hud_["jitter"]->setText(QString("%1 ms").arg(rt.value("jitter_ms", 0.0), 0, 'f', 3));
@@ -974,6 +1377,7 @@ QString ConsoleWindow::source_status() const { return source_status_->text(); }
 QString ConsoleWindow::slider_label(const std::string& key) const {
   if (key == "speed") return speed_val_->text();
   if (key == "brightness") return bright_val_->text();
+  if (key == "ramp") return ramp_val_->text();
   if (key == "phase") return phase_val_->text();
   if (key == "gamma") return gamma_val_->text();
   return contrast_val_->text();

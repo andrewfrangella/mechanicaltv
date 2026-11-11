@@ -34,10 +34,13 @@ that.
 - The step train starts at 0.02 rev/s and follows a jerk-limited S-curve to the target. No step in
   speed is larger than one 5 ms tick of acceleration. Settings: `MTV_START_FPS`, `MTV_RAMP_RATE`
   (default 2 FPS/s), `MTV_JERK_TIME` and `MTV_ENABLE_SETTLE`.
-- **Stall detection.** The motor is stopped, the LED blanked and the reason shown if no index pulse
-  arrives within 1 s, or 3 revolution periods, once the motor is commanded above 0.3 rev/s. It also
-  triggers if the measured steps per revolution differ from the expected count by more than 8 % for
-  3 revolutions.
+- **Missing-notch and slip detection.** The LED is kept dark and the reason shown if no index pulse
+  arrives within 1 s, or 3 revolution periods, once the motor is commanded above 0.3 rev/s. If the
+  measured steps per revolution differ from the expected count by more than 8 % for 3 revolutions
+  (disk slipping on the shaft, lost steps, microstep mismatch) a warning is shown and the LED is
+  timed from the measured notch-to-notch period instead of the motor speed, so a picture remains.
+  The motor keeps running (`MTV_STALL_STOP=1` stops it instead). The console's Tests tab runs the
+  motor, the sensor and the LED one at a time.
 - **Check microstepping** (a console button) spins the disk slowly and counts motor steps between
   two index pulses. It then reports the microstep mode the driver is really in.
 
@@ -108,6 +111,9 @@ app timed things:
   carries a CLOCK_MONOTONIC timestamp taken in the hard-IRQ handler, microseconds after the edge,
   and no kernel debounce is used (it would move timestamping to a workqueue). Bounces are rejected
   in software if they arrive within 20 ms or within half a revolution of the previous edge.
+  A line that pulses continuously still yields one accepted edge every 20 ms, so the controller also
+  counts motor steps between pulses: fewer than 100 (half a full-step revolution) is sensor noise,
+  not a stepping mode, and the stop message names the sensor line instead of the MS jumpers.
 - **Every revolution re-anchored.** Each revolution is emitted on an absolute timeline that starts
   at that edge's timestamp. Late wake-ups only darken the first pixel or two; they never shift the
   picture, and the phase cannot drift.

@@ -70,6 +70,7 @@ class MockLedOutput : public LedOutput {
   std::string backend() const override { return "simulated"; }
   bool is_mock() const override { return true; }
   NipkowStream last_stream();
+  std::atomic<std::int64_t> last_period_ns{0};   // revolution length given to the last output() (tests)
 
  private:
   bool blocking_;
