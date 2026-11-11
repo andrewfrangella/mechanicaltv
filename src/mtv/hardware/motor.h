@@ -60,10 +60,6 @@ class MotorDriver {
   virtual void enable() {}            // energise the coils (A4988 ENABLE low)
   virtual void release() = 0;         // stop stepping, de-energise
   virtual int steps_per_rev() const = 0;
-  // STEP/DIR drivers: change the microstep setting (the mode the MS jumpers select) while stopped.
-  // False when the driver's stepping is fixed (Motor HAT).
-  virtual bool set_microsteps(int) { return false; }
-  virtual int microsteps() const { int ms = steps_per_rev() / 200; return ms < 1 ? 1 : ms; }
   virtual double step_count() = 0;    // integrated steps since start (fractional for rate drivers)
   // Steps commanded up to instant t_ns (CLOCK_MONOTONIC); drivers without a history return step_count().
   virtual double step_count_at(std::int64_t t_ns) { return step_count(); }
@@ -81,10 +77,6 @@ class MockMotorDriver : public MotorDriver {
   void enable() override;
   void release() override;
   int steps_per_rev() const override { return steps_per_rev_; }
-  bool set_microsteps(int n) override {
-    steps_per_rev_ = 200 * (n < 1 ? 1 : n);
-    return true;
-  }
   double step_count() override { return acct_.count(); }
   double step_count_at(std::int64_t t_ns) override { return acct_.count_at(t_ns); }
   double rate() const { return acct_.rate(); }
@@ -94,7 +86,7 @@ class MockMotorDriver : public MotorDriver {
 
  private:
   StepAccount acct_;
-  std::atomic<int> steps_per_rev_;
+  int steps_per_rev_;
   std::atomic<bool> released_{true};
 };
 
@@ -113,20 +105,16 @@ class A4988PWMDriver : public MotorDriver {
   void enable() override;
   void release() override;
   int steps_per_rev() const override { return 200 * microsteps_; }
-  bool set_microsteps(int n) override {
-    microsteps_ = n < 1 ? 1 : n;
-    return true;
-  }
   double step_count() override { return acct_.count(); }
   double step_count_at(std::int64_t t_ns) override { return acct_.count_at(t_ns); }
   std::string name() const override { return "A4988PWMDriver"; }
   json telemetry() override;
-  int microsteps() const override { return microsteps_; }
+  int microsteps() const { return microsteps_; }
 
  private:
   std::mutex lock_;   // serialises device I/O; never taken by the realtime thread
   StepAccount acct_;
-  std::atomic<int> microsteps_;
+  int microsteps_;
   std::atomic<int> direction_;
   double rate_ = 0.0;
   std::atomic<bool> released_{true};
@@ -167,8 +155,7 @@ class AdafruitMotorHATDriver : public MotorDriver {
 // Factory: MTV_MOCK_HARDWARE=1 or force_mock -> mock; MTV_MOTOR_DRIVER=a4988|stepdir|drv8825|tmc2209
 // -> A4988 (errors propagate: with this selected the HAT has no motor); otherwise try the HAT, then
 // fall back to the mock with *note set to the reason.
-// microsteps > 0 overrides MTV_MICROSTEPS (the console's saved setting).
-std::unique_ptr<MotorDriver> create_motor_driver(int port, bool force_mock, std::string* note = nullptr, int microsteps = 0);
+std::unique_ptr<MotorDriver> create_motor_driver(int port, bool force_mock, std::string* note = nullptr);
 
 // Jerk-limited speed profile shared by the rate thread and the HAT stepping thread.
 class SpeedProfile {
@@ -192,11 +179,6 @@ class MotorController {
   void start();   // enable, settle, ramp from MTV_START_FPS
   void stop();    // stop stepping and release the coils (the disk coasts down)
   void set_target_fps(double fps);   // clamped to [1, 24]
-  // Console settings. The microstep change is refused (false) while the motor runs or when the
-  // driver's stepping is fixed; the ramp rate applies from the next acceleration.
-  bool set_microsteps(int microsteps);
-  void set_ramp_rate(double fps_per_s);   // clamped to [0.1, 50]
-  int microsteps() const { return driver_->microsteps(); }
   // Run at an exact low step rate for the microstep self-test (bypasses the FPS clamp).
   void start_test_rate(double steps_per_s);
   bool is_running() const { return running_; }

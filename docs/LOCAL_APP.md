@@ -51,7 +51,7 @@ pill is then red.
 
 - **Header pills:**
   - Hardware mode: REALTIME HARDWARE or SIMULATION.
-  - Motor state: IDLE, RAMPING, RUNNING, LOCKED, TESTING, MOTOR TEST or STALLED.
+  - Motor state: IDLE, RAMPING, RUNNING, LOCKED, TESTING or STALLED.
   - Sync: LOCKED, UNLOCKED or FREE-RUN.
   - HDMI: LIVE, BLACK, NO SIGNAL or IDLE.
   - Log: `LOG: n ERRORS` turns red; click it for the debug window.
@@ -94,16 +94,6 @@ Use it to prove the video path (capture, scaling, gamma, LED driver) on the benc
 on with a printed disk stopped under the 3 W LED. Emergency blank, Ctrl+Q and closing the window
 turn it off; stopping the motor does not.
 
-## Motor settings
-
-**Microsteps** (Motor & LED panel) selects the driver's microstep mode: 1/1 to 1/64, shown with
-the steps per revolution the motor is then commanded (200 x the mode). It must match the MS
-jumpers on the driver; change it with the motor stopped, then press **Check microstepping** to
-confirm. **Spin-up ramp** sets the acceleration after the coils energise, in FPS gained per second
-(0.1-10; `MTV_RAMP_RATE` allows up to 50). Lower it if a heavy disk slips or stalls while spinning
-up. Both are saved in the data directory's `settings.json` and override `MTV_MICROSTEPS` and
-`MTV_RAMP_RATE` on the next start.
-
 ## Check microstepping
 
 With the motor stopped and free-run off, **Check microstepping** turns the disk at 0.25 rev/s, as
@@ -111,50 +101,18 @@ configured, for up to 40 s. It counts motor steps between two debounced index pu
 the result:
 
 - `Microstep check passed: 3200 steps per revolution measured (1/16)` when the jumpers match.
-- Otherwise, the measured mode and what to change (the MS pins or the **Microsteps** selector).
-- `Microstep check FAILED: the index sensor on GPIO 4 pulsed ... while the motor made only N steps`
-  when pulses arrive with fewer than 100 motor steps between them. No stepping mode does that: the
-  sensor line is pulsing on its own (noise from the motor or driver leads, a loose signal, supply or
-  ground wire, or the notch parked at the edge of the sensor slot).
+- Otherwise, the measured mode and what to change (the MS pins or `MTV_MICROSTEPS`).
 
 If the driver is really at full step, the disk turns 16 times faster than intended during the check,
 at 4 rev/s, and may stall. A stall shows as "index pulse(s)" missing, so measure the MS pins as well.
 Stop and Emergency blank cancel the check.
 
-## When the sensor and the motor disagree
+## When the motor stalls
 
-The motor runs on its own clock and keeps turning whatever the index sensor sees. The sensor only
-places each revolution of the picture: the notch marks where a revolution starts, and the motor's
-speed (including the spin-up ramp) gives how long it lasts. The LED is lit only while the notch
-arrives every revolution's worth of motor steps.
-
-- **No index pulse** for a second (or 3 revolutions) while the motor turns above 0.3 rev/s: the
-  footer says so, SYNC LOCK reads NO NOTCH (LED OFF), and the LED stays dark. It clears by itself
-  when the notch is seen again.
-- **Wrong steps per revolution** (more than 8 % off for 3 revolutions): the footer names the likely
-  microstep mode or a slipping rotor, SYNC LOCK reads SLIPPING (SENSOR-TIMED), and the LED is
-  timed from the notch-to-notch period until the disk follows the motor again.
-- **Edges fewer than 100 motor steps apart** are bounce, noise, or the notch edge parked in the beam
-  and shaken across the threshold when the coils energise. They are counted as rejected and ignored.
-
-`MTV_STALL_STOP=1` restores the old behaviour of stopping the motor (pill STALLED) on these. See
-[DIAGNOSIS.md](DIAGNOSIS.md) for the bench checklist.
-
-## Tests tab
-
-The second tab runs each part of the machine on its own.
-
-- **Motor only** spins the motor at the chosen speed with the LED locked off and no stall checks.
-  It shows the commanded speed and the microstep setting. Space starts and stops it while the tab
-  is shown.
-- **LED only** lights the LED steady or blinking once a second at a chosen level, with the motor
-  stopped or in the motor-only test. It switches itself off after 30 s.
-- **Index sensor** shows the line level (HIGH or LOW), edge counts, a 5 s timeline of edges (tall
-  green for an accepted notch, short red for a rejected one), the last edges with the time and
-  motor steps since the edge before, and each revolution between accepted notches with its steps
-  against the expected count. Tick *Watch the sensor* to read it with the motor stopped and turn
-  the disk by hand: each pass of the notch should add one green mark. A burst of red marks means a
-  flickering output.
+If no index pulse arrives within a second (or 3 revolutions) while the motor is commanded above
+0.3 rev/s, or the steps per revolution are off by more than 8 % for 3 revolutions, the console stops
+the motor and blanks the LED. The motor pill reads STALLED and the footer gives the reason and what
+to check. Press Spin up to try again. See [DIAGNOSIS.md](DIAGNOSIS.md) for the bench checklist.
 
 ## Debug log
 

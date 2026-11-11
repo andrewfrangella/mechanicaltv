@@ -149,25 +149,19 @@ stable `/dev/v4l/by-id/...` path for `MTV_HDMI_DEVICE`.
 `--env-file`. Restart the console after editing. Real environment variables win over the file, and
 command-line options win over both.
 
-Two motor settings can also be changed in the console's **Motor & LED** panel: **Microsteps** and
-**Spin-up ramp**. A choice made there is saved in `settings.json` in the data directory
-(`~/.local/share/mechanical-tv` by default) and wins over `MTV_MICROSTEPS` and `MTV_RAMP_RATE` on
-every later start. Delete that file to return to the environment values.
-
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MTV_MOTOR_DRIVER` | `a4988` | `a4988` (also `drv8825`, `tmc2209`, `stepdir`) or `hat`. Anything else runs in simulation with a note |
 | `MTV_MOTOR_PORT` | `1` | HAT stepper port (1 = M1/M2, 2 = M3/M4) |
-| `MTV_MICROSTEPS` | `16` | Must match the driver's MS jumpers; check with **Check microstepping**. The console's **Microsteps** selector overrides it (see below) |
+| `MTV_MICROSTEPS` | `16` | Must match the driver's MS jumpers; check with **Check microstepping** |
 | `MTV_DIR_GPIO`, `MTV_ENABLE_GPIO` | `23`, `24` | A4988 DIR and ENABLE |
 | `MTV_MOTOR_DIRECTION` | `1` | `-1` reverses the motor |
 | `MTV_PWM_CHIP` | first `/sys/class/pwm/pwmchip*` | PWM chip for STEP, as a full sysfs path such as `/sys/class/pwm/pwmchip0` |
-| `MTV_RAMP_RATE` | `2.0` | Maximum acceleration in FPS per second (0.1-50). The console's **Spin-up ramp** slider overrides it (see below) |
+| `MTV_RAMP_RATE` | `2.0` | Maximum acceleration in FPS per second (0.1-50) |
 | `MTV_START_FPS` | `0.02` | Speed of the first steps after enable (rev/s) |
 | `MTV_JERK_TIME` | `0.5` | Seconds over which acceleration builds up (S-curve) |
 | `MTV_ENABLE_SETTLE` | `0.2` | Seconds the coils hold before the first step |
-| `MTV_STALL_DETECT` | `1` | `0` turns off the missing-pulse and slip checks and their warnings |
-| `MTV_STALL_STOP` | `0` | `1` makes a missing index pulse or a slip stop the motor; by default the motor keeps running; a missing pulse darkens the LED, a slip times it from the sensor |
+| `MTV_STALL_DETECT` | `1` | `0` disables stall and slip detection |
 | `MTV_STEP_MODE` | `half` | HAT only: `full` for 200 steps per revolution |
 | `MTV_OPTO_PIN`, `MTV_OPTO_PULL` | `4`, `down` | Index sensor GPIO and bias (`down`, `up`, `none`) |
 | `MTV_MICROSTEP_TEST_RPS` | `0.25` | Speed of Check microstepping, in revolutions per second at the configured setting |

@@ -62,10 +62,9 @@ void LedOutput::account(const NipkowStream& stream) {
   blanked = false;
 }
 
-void MockLedOutput::output(const NipkowStream& stream, std::int64_t, std::int64_t period_ns, std::int64_t t_end,
+void MockLedOutput::output(const NipkowStream& stream, std::int64_t, std::int64_t, std::int64_t t_end,
                            const std::atomic<bool>& abort, const EdgeProbe& next_edge) {
   if (abort) return;
-  last_period_ns = period_ns;
   if (blocking_) {
     while (!abort && now_ns() < t_end && !(next_edge && next_edge())) sleep_s(0.0005);
   }

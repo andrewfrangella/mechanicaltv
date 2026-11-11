@@ -8,7 +8,6 @@
 #include <QMainWindow>
 #include <QPushButton>
 #include <QSlider>
-#include <QTabWidget>
 #include <QTableWidget>
 #include <QTimer>
 #include <condition_variable>
@@ -54,13 +53,6 @@ class ConsoleWindow : public QMainWindow {
   QSize source_shown() const;
   QSize output_shown() const;
   void wait_idle();   // tests: wait until the action queue is empty
-  int microsteps_selected() const;
-  // Tests tab
-  void show_tests_tab(bool on) { tabs_->setCurrentIndex(on ? 1 : 0); }
-  bool tests_tab_shown() const { return tabs_->currentIndex() == 1; }
-  QString test_text(const std::string& key) const;   // "motor", "led", "level", "counts", "hint"
-  int test_edge_rows() const { return edges_table_->rowCount(); }
-  int test_revolution_rows() const { return revs_table_->rowCount(); }
   void refresh_now() {
     tick_count_ = 0;   // force a telemetry refresh, not just a repaint
     tick();
@@ -73,8 +65,6 @@ class ConsoleWindow : public QMainWindow {
 
  private:
   void build();
-  QWidget* build_tests_page();
-  void update_tests(const json& rt);
   QWidget* panel(QWidget* parent = nullptr);
   QLabel* heading(const QString& text);
   QLabel* pill();
@@ -88,8 +78,6 @@ class ConsoleWindow : public QMainWindow {
   void update_hud(const json& rt);
   void sync_source_widgets(const json& pipe);
   void sync_calibration_widgets();
-  void sync_microsteps_box(int microsteps);
-  void save_motor_settings();
   void refresh_library();
   void drain_log();
   void source_selected(int index);
@@ -120,21 +108,10 @@ class ConsoleWindow : public QMainWindow {
   std::map<std::string, QLabel*> hud_;
   // controls
   QPushButton *btn_start_, *btn_stop_, *btn_test_;
-  QComboBox* microsteps_box_;
-  double microsteps_changed_at_ = 0;
-  QSlider *speed_, *bright_, *ramp_, *phase_, *gamma_, *contrast_;
-  QLabel *speed_val_, *bright_val_, *ramp_val_, *phase_val_, *gamma_val_, *contrast_val_;
+  QSlider *speed_, *bright_, *phase_, *gamma_, *contrast_;
+  QLabel *speed_val_, *bright_val_, *phase_val_, *gamma_val_, *contrast_val_;
   QCheckBox *free_run_box_, *inv_x_, *inv_y_, *crop_box_;
   QTableWidget* table_;
-  QTabWidget* tabs_ = nullptr;
-  // Tests tab
-  QPushButton *btn_motor_test_, *btn_motor_test_stop_, *btn_led_steady_, *btn_led_blink_, *btn_led_off_;
-  QSlider *test_speed_ = nullptr, *test_led_level_ = nullptr;
-  QLabel *test_speed_val_, *test_led_level_val_, *test_motor_status_, *test_led_status_;
-  QLabel *test_sensor_level_, *test_sensor_counts_, *test_sensor_hint_;
-  QCheckBox* sensor_watch_box_;
-  QWidget* edge_strip_;
-  QTableWidget *edges_table_, *revs_table_;
   QLabel *lib_status_, *notice_label_, *footer_right_;
 
   struct SliderInfo {

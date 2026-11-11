@@ -44,13 +44,13 @@
 0.7-0.8 A, use 0.56-0.64 V with 0.1 Ω sense resistors (marked R100), 0.38-0.44 V with 0.068 Ω
 (R068), or 0.28-0.32 V with 0.05 Ω (R050). Fit a heatsink: above about 1 A a bare A4988 reaches
 thermal shutdown within seconds. Check the microstep setting with **Check microstepping** in the
-console; the console's **Microsteps** selector (or `MTV_MICROSTEPS`) must match the jumpers.
+console; `MTV_MICROSTEPS` must match the jumpers.
 
 DRV8825: 1/16 is MS1 low, MS2 low, MS3 high (M0, M1 low, M2 high), and 1/32 is all high. Its
 current is I = 2 × Vref, so 0.35-0.40 V gives 0.7-0.8 A. **Do not use the A4988 values**: they
 overdrive the motor. TMC2209 (standalone module): 1/16 is MS1 and MS2 high. The Vref formula
 depends on the module (for example BIGTREETECH: I_rms ≈ Vref × 0.71); follow the module's sheet.
-Set **Microsteps** in the console (or `MTV_MICROSTEPS`) to match whichever mode is wired.
+Set `MTV_MICROSTEPS` to match whichever mode is wired.
 
 ## Index sensor
 
@@ -135,9 +135,8 @@ is kept with the 3D model files.
 
 1. **Interlock:** the LED is blanked when no index pulse arrives for 350 ms, or 1.5 revolutions if
    longer. It is never lit below 0.9 measured FPS.
-2. **No-notch interlock:** no pulses while commanded to spin, or the wrong number of steps per
-   revolution, keeps the LED dark with a message; the motor keeps running (`MTV_STALL_STOP=1` stops
-   it instead).
+2. **Stall stop:** no pulses while commanded to spin, or the wrong number of steps per revolution,
+   stops the motor and blanks the LED with a message.
 3. **Emergency blank** turns off the LED, stops the motor and leaves free-run.
 4. **Free-run bypasses the interlock** on purpose for bench tests. Never leave it on with a stopped
    disk under the 3 W LED.
